@@ -2521,7 +2521,30 @@ function parseInline(text, refs, out) {
             }
           }
         }
-        if (crossesLink) {
+        // Tainted opener: a backtick run that closes an unmatched
+        // longer backtick run ("``word`") inside a link text is literal,
+        // not a code-span opener (doc-16/28/35: the link forms; the
+        // span must not swallow the "]"). A clean backtick still forms
+        // a span across the link (cm-342/525), and a tainted opener
+        // outside a link still forms one (t57).
+        let tainted = false;
+        {
+          let w = i - 1;
+          while (w >= 0 && isWordCode(text.charCodeAt(w))) w--;
+          if (w >= 0 && text[w] === '`' && w < i - 1) {
+            let r = 0, q = w;
+            while (q >= 0 && text[q] === '`') { r++; q--; }
+            if (r > runLen) {
+              for (let d = delims.length - 1; d >= 0; d--) {
+                const od = delims[d];
+                if (od.removed || !od.active) continue;
+                if (od.ch === '[' || od.ch === '![') { tainted = true; }
+                break;
+              }
+            }
+          }
+        }
+        if (crossesLink || tainted) {
           addText(i, j);
           i = j;
         } else {
