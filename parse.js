@@ -237,17 +237,17 @@ function tryLink(src, i, isImg, refs) {
   const close = findClose(src, i + 1, isImg, refs);
   if (close < 0) return null;
   const after = close + 1;
-  // inline (dest "title")
+  // inline (dest "title"); if the destination is invalid, fall through to
+  // the shortcut reference form (the [text] alone may be a defined ref).
   if (src[after] === '(') {
     const r = parseInlineDest(src, after);
-    if (!r) return null;
-    return { end: r.end, href: r.href, title: r.title, ts: i + 1, te: close, isImage: isImg };
+    if (r) return { end: r.end, href: r.href, title: r.title, ts: i + 1, te: close, isImage: isImg };
   }
-  // full reference [label] (falls through to shortcut if not a defined ref)
+  // full reference [label]
   if (src[after] === '[') {
     if (src[after + 1] === ']') {
       const rawText = src.slice(i + 1, close);
-      const key = foldLabel(resolveEscapes(rawText));
+      const key = foldLabel(rawText);
       if (key.length === 0) return null;
       const ref = refs.get(key);
       if (!ref) return null;
@@ -255,17 +255,21 @@ function tryLink(src, i, isImg, refs) {
     }
     const lab = scanLabel(src, after + 1);
     if (lab !== null) {
-      const key = foldLabel(resolveEscapes(lab.text));
-      if (key.length > 0) {
-        const ref = refs.get(key);
-        if (ref) return { end: lab.end, href: ref.href, title: ref.title, ts: i + 1, te: close, isImage: isImg };
-      }
+      // A present but undefined label does NOT fall through to the shortcut:
+      // [foo][bar] with bar undefined leaves [foo] literal (a later
+      // [bar][baz] may still form). Only a malformed label falls through.
+      const key = foldLabel(lab.text);
+      if (key.length === 0) return null;
+      const ref = refs.get(key);
+      if (!ref) return null;
+      return { end: lab.end, href: ref.href, title: ref.title, ts: i + 1, te: close, isImage: isImg };
     }
     // not a defined reference: fall through to the shortcut form below
   }
-  // shortcut: the link text itself is the label
+  // shortcut: the link text itself is the label (compared raw: backslash
+  // escapes in a label do NOT resolve for lookup, so [foo\!] != [foo!]).
   const rawText = src.slice(i + 1, close);
-  const key = foldLabel(resolveEscapes(rawText));
+  const key = foldLabel(rawText);
   if (key.length === 0) return null;
   const ref = refs.get(key);
   if (!ref) return null;
@@ -346,7 +350,7 @@ function linkSuffixForms(src, i, refs) {
     if (src[i + 1] === ']') return false; // collapsed: label unknown here
     const lab = scanLabel(src, i + 1);
     if (lab === null) return false;
-    const key = foldLabel(resolveEscapes(lab.text));
+    const key = foldLabel(lab.text);
     return key.length > 0 && refs.has(key);
   }
   return false;
@@ -457,10 +461,11 @@ function matchRawHtml(src, i) {
   if (src[i] !== '<') return null;
   const n = src.length;
   let j = i + 1;
-  // Comment <!-- ... -->
+  // Comment <!-- ... -->. Abrupt closings <!--> and <!---> are complete
+  // comments (inline); otherwise the comment ends at the first -->.
   if (src.startsWith('<!--', i)) {
-    const nxt = src[i + 4];
-    if (nxt === '>' || nxt === '-') return null;
+    if (src.startsWith('<!-->', i)) return '<!-->';
+    if (src.startsWith('<!--->', i)) return '<!--->';
     const k = src.indexOf('-->', i + 4);
     if (k === -1) return null;
     return src.slice(i, k + 3);
@@ -870,7 +875,11 @@ function scanInline(src, refs, noExt) {
   while (i < n) {
     const ch = src[i];
     if (ch === '\\') {
-      if (src[i + 1] === '\n') { flush(); nodes.push({ t: 'b' }); i += 2; continue; }
+      if (src[i + 1] === '\n') {
+        flush(); nodes.push({ t: 'b' }); i += 2;
+        while (i < n && (src[i] === ' ' || src[i] === '\t')) i++;
+        continue;
+      }
       if (i + 1 < n && isPunct(src[i + 1])) { buf += src[i + 1]; i += 2; continue; }
       buf += '\\'; i++; continue;
     }
@@ -937,7 +946,9 @@ function scanInline(src, refs, noExt) {
       while (k >= 0 && src[k] === ' ') { sp++; k--; }
       if (sp >= 2) {
         buf = buf.slice(0, buf.length - sp);
-        flush(); nodes.push({ t: 'b' }); i++; continue;
+        flush(); nodes.push({ t: 'b' }); i++;
+        while (i < n && (src[i] === ' ' || src[i] === '\t')) i++;
+        continue;
       }
       buf += '\n'; i++; continue;
     }
@@ -1131,7 +1142,7 @@ function tryRefDef(lines, i, refs) {
   if (s[0] !== '[') return 0;
   const lab = scanLabelLines(lines, i, s);
   if (lab === null) return 0;
-  const key = foldLabel(resolveEscapes(lab.text));
+  const key = foldLabel(lab.text);
   if (key.length === 0) return 0;
   let rest = lab.rest;
   // The ':' must follow the label (optional whitespace allowed before it? no
