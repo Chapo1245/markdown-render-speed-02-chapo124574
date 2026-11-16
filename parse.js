@@ -303,13 +303,18 @@ function findClose(src, i, isImg, refs) {
   // stack of openers: {pos, isImg} for the outer opener then inner ones.
   const stack = [{ pos: i - 1, isImg }];
   let j = i;
+  let tainted = false; // a backtick run on this line was unclosed: later
+  // backtick runs on the same line are literal, not code-span openers.
   while (j < n) {
     const ch = src[j];
+    if (ch === '\n') tainted = false;
     if (ch === '\\' && j + 1 < n && isPunct(src[j + 1])) { j += 2; continue; }
     if (ch === '`') {
       const run = countRun(src, j, '`');
-      const end = findCodeEnd(src, j + run, run);
+      if (tainted) { j += run; continue; }
+      const end = findCodeEndLink(src, j + run, run);
       if (end >= 0) { j = end + run; continue; }
+      tainted = true;
       j += run; continue;
     }
     if (ch === '<') {
@@ -461,6 +466,23 @@ function findCodeEnd(src, i, len) {
       if (run === len) return j;
       j += run;
     } else j++;
+  }
+  return -1;
+}
+
+// Code-span closer for findClose: scans for a run of exactly `len`
+// backticks, but a run of a DIFFERENT length before it means the opener
+// has no close (the opener is unclosed / tainted).
+function findCodeEndLink(src, i, len) {
+  const n = src.length;
+  let j = i;
+  while (j < n) {
+    if (src[j] === '`') {
+      const run = countRun(src, j, '`');
+      if (run === len) return j;
+      return -1;
+    }
+    j++;
   }
   return -1;
 }
@@ -680,7 +702,7 @@ function matchExtUrl(src, i, isWww) {
         last === "'" || last === '"') { end--; continue; }
     break;
   }
-  if (end <= minEnd) return -1;
+  if (end <= prefixEnd) return -1;
   return end;
 }
 
@@ -810,6 +832,10 @@ function processEmphasis(nodes, delims) {
     if (!cur.c || cur.n === 0) { cur = cur.dn; continue; }
     let cand = cur.dp;
     let opener = null;
+    // If the nearest opener is tainted (blocked), the closer may only
+    // match a farther opener whose use is strictly larger than the use
+    // it would have had with the tainted opener.
+    let taintedUse = -1;
     while (cand) {
       if (cand.ch === cur.ch && cand.o && cand.n > 0 && !cand.enclosed) {
         // Strikethrough needs matching run lengths.
@@ -819,12 +845,25 @@ function processEmphasis(nodes, delims) {
             !(cand.orig % 3 === 0 && cur.orig % 3 === 0)) {
           cand = cand.dp; continue;
         }
-        // Blocked opener: a can-both closer that formed emphasis taints
-        // the nearest earlier opener; the next closer skips it entirely
-        // (regardless of use) and tries a farther opener.
+        // Tainted opener: a can-both closer that formed emphasis taints
+        // the nearest earlier opener. A closer may match the tainted
+        // opener only with a use strictly larger than the tainting
+        // match's use; otherwise it skips it (the taint persists for
+        // later closers) and may only match a farther opener with a
+        // strictly larger use than it would have had with the tainted one.
         if (cand === blocked) {
-          blocked = null; blockUse = 0;
+          const u = cur.ch === '~' ? cur.n : (cand.n >= 2 && cur.n >= 2 ? 2 : 1);
+          if (u > blockUse) {
+            blocked = null; blockUse = 0;
+            opener = cand; break;
+          }
+          taintedUse = u;
           cand = cand.dp; continue;
+        }
+        // A farther opener after a tainted one needs strictly larger use.
+        if (taintedUse !== -1) {
+          const u = cur.ch === '~' ? cur.n : (cand.n >= 2 && cur.n >= 2 ? 2 : 1);
+          if (u <= taintedUse) { cand = cand.dp; continue; }
         }
         opener = cand; break;
       }
