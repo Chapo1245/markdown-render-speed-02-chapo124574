@@ -307,6 +307,15 @@ function findClose(src, i, isImg, refs) {
       if (end >= 0) { j = end + run; continue; }
       j += run; continue;
     }
+    if (ch === '<') {
+      // An angle autolink or raw HTML tag swallows its contents, including
+      // any ']' inside it, so it cannot close the link text.
+      const auto = matchAngleAutolink(src, j);
+      if (auto !== null) { j += auto.text.length + 2; continue; }
+      const tag = matchRawHtml(src, j);
+      if (tag !== null) { j += tag.length; continue; }
+      j++; continue;
+    }
     if (ch === '[') {
       depth++;
       stack.push(src[j - 1] === '!' ? 1 : 0);
@@ -754,7 +763,7 @@ function processEmphasis(nodes, delims) {
     let cand = cur.dp;
     let opener = null;
     while (cand) {
-      if (cand.ch === cur.ch && cand.o && cand.n > 0) {
+      if (cand.ch === cur.ch && cand.o && cand.n > 0 && !cand.enclosed) {
         // Strikethrough needs matching run lengths.
         if (cur.ch === '~' && cand.n !== cur.n) { cand = cand.dp; continue; }
         if (((cand.o && cand.c) || (cur.o && cur.c)) &&
@@ -782,6 +791,11 @@ function processEmphasis(nodes, delims) {
     const oi = nodes.indexOf(opener);
     const ci = nodes.indexOf(cur);
     if (oi === -1 || ci === -1 || oi >= ci) { cur = cur.dn; continue; }
+    // Delimiters strictly between the opener and closer are now enclosed
+    // in this emphasis element: a later closer outside it cannot match
+    // them (they stay literal unless matched from inside, which happens
+    // before this pair forms because closers run in forward order).
+    for (let d = opener.dn; d && d !== cur; d = d.dn) d.enclosed = true;
     // Emphasis formed at a different opener clears a pending blocker
     // (set by an earlier match).
     if (blocked && opener !== blocked) { blocked = null; blockUse = 0; }
