@@ -712,6 +712,38 @@ function isLocalChar(c) {
   return isAlnum(c) || c === '.' || c === '_' || c === '+' || c === '-';
 }
 
+// Like matchEmail, but a trailing '_' that would invalidate the domain is
+// left out (the '_' belongs to an emphasis closer, not the address).
+// A trailing '-' still invalidates. Returns the end index, or -1.
+function matchEmailTrunc(src, i) {
+  const n = src.length;
+  let j = i;
+  while (j < n && isLocalChar(src[j])) j++;
+  if (j === i || j >= n || src[j] !== '@') return -1;
+  let labels = 0;
+  let k = j + 1;
+  let end = -1;
+  while (true) {
+    const c = src[k];
+    if (c === undefined || !(isAlnum(c) || c === '_' || c === '-')) return -1;
+    let lastAlnum = -1;
+    while (k < n && (isAlnum(src[k]) || src[k] === '_' || src[k] === '-')) {
+      if (isAlnum(src[k])) lastAlnum = k + 1;
+      k++;
+    }
+    if (lastAlnum === -1) return -1;
+    labels++;
+    end = lastAlnum;
+    if (src[k] === '.' && k + 1 < n && (isAlnum(src[k + 1]) || src[k + 1] === '_' || src[k + 1] === '-')) { k++; continue; }
+    break;
+  }
+  if (labels < 2) return -1;
+  // Only a trailing '_' may be shed (it is the emphasis closer); a
+  // trailing '-' means the address is not an autolink at all.
+  if (src[k - 1] === '-') return -1;
+  return end;
+}
+
 // ---------------------------------------------------------------------------
 // Flanking for a delimiter run starting at i (length run, char ch).
 function flankInfo(src, i, run) {
@@ -999,7 +1031,14 @@ function scanInline(src, refs, noExt) {
           }
         }
       } else if (isLocalChar(ch) && (i === 0 || !isLocalChar(src[i - 1]))) {
-        const end = matchEmail(src, i);
+        let end = matchEmail(src, i);
+        if (end === -1) {
+          // A trailing '_' in the domain may be an emphasis closer rather
+          // than part of the address. If an unmatched '_' opener exists,
+          // retry with the domain truncated before that trailing '_'.
+          const hasOpen = delims.some(d => d.ch === '_' && d.o && d.n > 0);
+          if (hasOpen) end = matchEmailTrunc(src, i);
+        }
         if (end !== -1) {
           const em = src.slice(i, end);
           flush(); nodes.push({ t: 'l', href: 'mailto:' + em, text: em }); i = end; continue;
