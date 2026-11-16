@@ -1676,6 +1676,20 @@ function listContentIndent(line, markerLen) {
 }
 
 // Collect a list starting at lines[i]. Returns {node, next}.
+// Is the raw line s a closing fence for the open fence {ch,len}? The
+// fence may be indented by at most 3 columns; after the run, only
+// whitespace may follow.
+function isClosingFence(s, fence) {
+  if (!s || s.length === 0) return false;
+  let k = 0;
+  while (k < s.length && s[k] === ' ' && k < 3) k++;
+  if (k >= s.length || s[k] !== fence.ch) return false;
+  let m = k;
+  while (m < s.length && s[m] === fence.ch) m++;
+  if (m - k < fence.len) return false;
+  return /^[ \t]*$/.test(s.slice(m));
+}
+
 // Incremental version of openFence: update the fence state ({ch,len} or
 // null) for one newly collected item line s. Blank lines do not change it.
 function updateFence(fence, s) {
@@ -1740,6 +1754,9 @@ function parseList(lines, i, refs) {
     const firstS = /^[ \t]*$/.test(firstContent) ? '' : ' '.repeat(firstLead) + firstContent;
     itemLines.push({ s: firstS, nl: ln.nl, blank: false });
     let fence = updateFence(null, firstS);
+    // itemLines.length when the current fence opened; a fence has
+    // content once a line has been added after its opener.
+    let fenceContentStart = fence !== null ? itemLines.length : -1;
     j++;
     let itemBlank = false;
     while (j < n) {
@@ -1794,12 +1811,25 @@ function parseList(lines, i, refs) {
       if (l2Ind >= contentInd) {
         const stripped = sliceCol(l2.s, contentInd);
         itemLines.push({ s: stripped, nl: l2.nl, blank: false });
+        const prevFence = fence;
         fence = updateFence(fence, stripped);
+        if (prevFence === null && fence !== null) fenceContentStart = itemLines.length;
         j++;
         continue;
       }
+      // A closing fence indented below the item's content indent does NOT
+      // close a fence inside this item: the item ends here, the fence is
+      // closed by the item ending, and the line is a new fence at the
+      // enclosing level. Likewise, a fence whose FIRST content line is
+      // below the content indent never gets content: the item ends and the
+      // fence is empty.
+      if (fence !== null) {
+        if (isClosingFence(l2.s, fence)) break;
+        if (itemLines.length <= fenceContentStart) break;
+      }
       // Fence content ignores container indentation: while a fenced code
-      // block in this item is unclosed, every line is fence content.
+      // block in this item is unclosed and already has content, every line
+      // is fence content.
       if (fence !== null) {
         itemLines.push({ s: l2.s, nl: l2.nl, blank: false });
         fence = updateFence(fence, l2.s);
