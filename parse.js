@@ -337,7 +337,27 @@ function findClose(src, i, isImg, refs) {
       depth--;
       if (depth === 0) return j;
       const inner = stack.pop();
-      if (!isImg && !inner.isImg) {
+      if (inner.isImg) {
+        // An inner image that forms (inline, full ref, collapsed, or
+        // shortcut) consumes its suffix: a '[label]' after the image's
+        // ']' is the image's reference label, not a new link opener.
+        const nxt = src[j + 1];
+        if (nxt === '(') {
+          const d = parseInlineDest(src, j + 1);
+          if (d !== null) { j = d.end; continue; }
+        } else if (nxt === '[') {
+          if (src[j + 2] === ']') {
+            if (refs.has(foldLabel(src.slice(inner.pos + 1, j)))) { j += 3; continue; }
+          } else {
+            const lab = scanLabel(src, j + 2);
+            if (lab !== null && lab.text.length > 0 && refs.has(foldLabel(lab.text))) { j = lab.end; continue; }
+          }
+        } else if (refs.has(foldLabel(src.slice(inner.pos + 1, j)))) {
+          j++; continue;
+        }
+        j++; continue;
+      }
+      if (!isImg) {
         // Would this ']' close an inner link? If the inner opener forms
         // a link, the outer link attempt aborts. The inner form depends
         // on its suffix: inline dest, full ref (defined label only),
