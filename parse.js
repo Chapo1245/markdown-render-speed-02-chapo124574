@@ -2820,6 +2820,23 @@ function processEmphasis(delims) {
     if (!b) { b = { '*': -1, '_': -1, '~': -1 }; bottoms.set(scope, b); }
     b[ch] = idx;
   }
+  // Blocker, per scope and per delimiter char: after an inner emphasis
+  // forms whose opener can only open and whose closer can both open and
+  // close, the NEXT closer may not match an opener at or before the
+  // inner opener if that opener's length differs from the inner use
+  // (doc-07: "*a **b**c*" — the outer * stays literal; but cm-411
+  // "*foo**bar**baz*" forms the outer because the inner opener can also
+  // close, and "**a **b**c**" forms it because the lengths match).
+  const blockers = new Map();
+  function blockerFor(scope, ch) {
+    const b = blockers.get(scope);
+    return b ? b[ch] : null;
+  }
+  function setBlocker(scope, ch, val) {
+    let b = blockers.get(scope);
+    if (!b) { b = { '*': null, '_': null, '~': null }; blockers.set(scope, b); }
+    b[ch] = val;
+  }
   let ci = 0;
   while (ci < delims.length) {
     const closer = delims[ci];
@@ -2833,10 +2850,29 @@ function processEmphasis(delims) {
     let oi = ci - 1;
     let found = -1, use = 1;
     const bot = bottomFor(closer.scope, closer.ch);
+    const blk = blockerFor(closer.scope, closer.ch);
+    let blockedSkip = false;
     while (oi > bot) {
       const opener = delims[oi];
       if (!opener.removed && opener.ch === closer.ch && opener.canOpen && opener.scope === closer.scope) {
         const u = (opener.node.len >= 2 && closer.node.len >= 2) ? 2 : 1;
+        // Blocker: the next closer after an inner emphasis whose opener
+        // can only open and whose closer can both open and close may
+        // not match an opener at or before the inner opener when the
+        // match is "incompatible": the opener's length differs from the
+        // inner use and the closer does not over-supply delimiters, or
+        // the use differs from the inner use and the closer would only
+        // partly consume the opener (doc-11: a "*" must not steal one
+        // delimiter from the initial "**"; doc-30: a "***" closer that
+        // fully supplies the strong is allowed). (Not applied to the
+        // same closer re-processing its leftover delimiters.)
+        if (blk && ci !== blk.ci && oi <= blk.openerIdx &&
+            ((opener.node.len !== blk.use && closer.node.len <= opener.node.len) ||
+             (u !== blk.use && closer.node.len < opener.node.len))) {
+          blockedSkip = true;
+          oi--;
+          continue;
+        }
         if (((opener.canOpen && opener.canClose) || (closer.canOpen && closer.canClose)) &&
             (opener.node.len + closer.node.len) % 3 === 0 &&
             (opener.node.len % 3 !== 0 || closer.node.len % 3 !== 0)) {
@@ -2853,12 +2889,19 @@ function processEmphasis(delims) {
       }
       oi--;
     }
+    // One-shot: a blocker set by an earlier emphasis applies to this
+    // closer only (a different closer than the one that set it).
+    if (blk && ci !== blk.ci) setBlocker(closer.scope, closer.ch, null);
     if (found === -1) {
       // A closer that can also open must not set the bottom: it may still
       // serve as an opener for a later closer (e.g. "foo*bar*" — the
       // first * is both opener and closer; setting the bottom here would
-      // block the second * from matching it).
-      if (!closer.canOpen) setBottom(closer.scope, closer.ch, ci);
+      // block the second * from matching it). Likewise a closer left
+      // unmatched only because the blocker skipped its opener must not
+      // set the bottom: the opener is reserved for a later strong
+      // (doc-01: the "*" after "other" must not block the final "**"
+      // from matching the initial "**").
+      if (!closer.canOpen && !blockedSkip) setBottom(closer.scope, closer.ch, ci);
       ci++;
       continue;
     }
@@ -2874,6 +2917,11 @@ function processEmphasis(delims) {
       if (!closer.canOpen) setBottom(closer.scope, closer.ch, ci);
       ci++;
       continue;
+    }
+    // Set the blocker when the inner opener can only open and the inner
+    // closer can both open and close (see the blocker comment above).
+    if (!opener.canClose && closer.canOpen) {
+      setBlocker(closer.scope, closer.ch, { openerIdx: found, use: use, ci: ci });
     }
     // If the closer is fully used, move on; otherwise try to match the
     // leftover closer again (it can pair with an earlier opener).
