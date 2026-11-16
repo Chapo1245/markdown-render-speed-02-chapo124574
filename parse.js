@@ -972,9 +972,12 @@ function isBlankLine(ln) {
 }
 function splitLines(md) {
   const parts = md.split('\n');
+  // A trailing "" part is only the artifact of a final \n, not a real line.
+  if (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
   const lines = [];
   for (let k = 0; k < parts.length; k++) {
-    lines.push({ s: parts[k], nl: k < parts.length - 1 });
+    const isLast = k === parts.length - 1;
+    lines.push({ s: parts[k], nl: !isLast || md.endsWith('\n') });
   }
   return lines;
 }
@@ -1282,10 +1285,12 @@ function parseParagraph(lines, i, refs, ctx) {
   while (j < n) {
     if (isBlankLine(lines[j])) break;
     // A setext underline ends the paragraph (it becomes a heading). This
-    // must be checked before the hr interrupt, since --- is both.
+    // must be checked before the hr interrupt, since --- is both. A lazy
+    // setext line (4 spaces prepended by the quote parser) is paragraph
+    // text, never an underline.
     const ind = indentCols(lines[j].s);
     const s = sliceCol(lines[j].s, Math.min(ind, 3));
-    if (j > i && setextLevel(s) > 0) {
+    if (j > i && !lines[j].lazySetext && setextLevel(s) > 0) {
       plines.push(lines[j]);
       j++;
       break;
@@ -1294,8 +1299,9 @@ function parseParagraph(lines, i, refs, ctx) {
     // Inside a container, a paragraph continuation line indented by 4+
     // columns loses 4 of them (the indented-code indent is stripped even
     // though the line stays part of the paragraph). At the top level the
-    // indentation is preserved.
-    if (j > i && ctx !== 'top' && ind >= 4) {
+    // indentation is preserved. A lazy-setext line keeps its prepended
+    // spaces (they are content, not indentation).
+    if (j > i && ctx !== 'top' && ind >= 4 && !lines[j].lazySetext) {
       plines.push({ s: sliceCol(lines[j].s, 4), nl: lines[j].nl });
     } else {
       plines.push(lines[j]);
@@ -1303,11 +1309,11 @@ function parseParagraph(lines, i, refs, ctx) {
     j++;
   }
   if (plines.length === 0) return { node: null, next: j };
-  // Setext: the last line is an underline.
+  // Setext: the last line is an underline (unless it is a lazy-setext line).
   const last = plines[plines.length - 1];
   const lastInd = indentCols(last.s);
   const lastS = sliceCol(last.s, Math.min(lastInd, 3));
-  const sl = setextLevel(lastS);
+  const sl = last.lazySetext ? 0 : setextLevel(lastS);
   if (sl > 0 && plines.length > 1) {
     const text = plines.slice(0, -1).map(l => l.s).join('\n')
       .replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
@@ -1405,21 +1411,25 @@ function parseQuote(lines, i, refs) {
     if (isHr(s)) break;
     if (htmlBlockType(s) >= 1 && htmlBlockType(s) <= 6) break;
     if (listMarker(s) !== null) break;
-    const innerLines = inner.map(l => ({ s: l.s, nl: l.nl }));
+    const innerLines = inner.map(l => ({ s: l.s, nl: l.nl, lazySetext: l.lazySetext }));
+    if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
     const parsed = parseBlocks(innerLines, refs, 'quote');
     if (!lastBlockIsPara(parsed)) break;
     // Lazy setext line: if the previous inner line was also lazy and the
     // paragraph is a direct child of this quote, prepend 4 spaces.
     let text = ln.s;
+    let lazySetext = false;
     const isSetextShape = /^=+[ \t]*$/.test(s) || /^--[ \t]*$/.test(s);
     if (isSetextShape && inner.length > 0 && inner[inner.length - 1].lazy &&
         lastBlockIsDirectPara(parsed)) {
       text = '    ' + s;
+      lazySetext = true;
     }
-    inner.push({ s: text, nl: ln.nl, lazy: true });
+    inner.push({ s: text, nl: ln.nl, lazy: true, lazySetext });
     j++;
   }
-  const innerLines = inner.map(l => ({ s: l.s, nl: l.nl }));
+  const innerLines = inner.map(l => ({ s: l.s, nl: l.nl, lazySetext: l.lazySetext }));
+  if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
   const ch = parseBlocks(innerLines, refs, 'quote');
   return { node: { t: 'quote', ch }, next: j };
 }
@@ -1524,6 +1534,7 @@ function parseList(lines, i, refs) {
         continue;
       }
       const innerLines = itemLines.filter(l => !l.blank).map(l => ({ s: l.s, nl: l.nl }));
+      if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
       const parsed = parseBlocks(innerLines, refs, 'list');
       if (lastBlockIsPara(parsed) && !isHr(l2S) && atxLevel(l2S) === 0 &&
           fenceStart(l2S) === null && htmlBlockType(l2S) < 1 && l2M === null) {
@@ -1537,6 +1548,7 @@ function parseList(lines, i, refs) {
     if (blankBeforeItem) loose = true;
     blankBeforeItem = false;
     const innerLines = itemLines.map(l => ({ s: l.s, nl: l.nl }));
+    if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
     const ch = parseBlocks(innerLines, refs, 'list');
     // Two-tier blank rule: the list is loose if this item's own inner
     // blocks were separated by a blank line. A blank inside a nested list
@@ -1611,9 +1623,13 @@ function parseBlocks(lines, refs, ctx) {
     if (isBlankLine(lines[i])) { pendingBlank = true; i++; continue; }
     // Link reference definitions (consumed, no node). A ref def does not
     // clear a pending blank: it is invisible, so a blank before it still
-    // separates the surrounding blocks.
+    // separates the surrounding blocks. A blank line before a ref def after
+    // a real block loosens the enclosing list (the ref def is a block).
     const defUsed = tryRefDef(lines, i, refs);
-    if (defUsed > 0) { i += defUsed; continue; }
+    if (defUsed > 0) {
+      if (pendingBlank && nodes.length > 0) loose = true;
+      i += defUsed; continue;
+    }
     if (pendingBlank && nodes.length > 0) loose = true;
     pendingBlank = false;
     const ln = lines[i];
@@ -1713,8 +1729,8 @@ function parseBlocks(lines, refs, ctx) {
         if (i >= n) endedAtEof = true;
       }
       let text = htmlLines.join('\n');
-      const atEof = i >= n || (i === n - 1 && lines[i].s === '' && !lines[i].nl);
-      if (atEof && htmlLines.length > 0 && lines[i - 1].nl) text += '\n';
+      const nextBlank = i < n && isBlankLine(lines[i]);
+      if (!nextBlank && htmlLines.length > 0 && lines[i - 1].nl) text += '\n';
       nodes.push({ t: 'html', text });
       continue;
     }
