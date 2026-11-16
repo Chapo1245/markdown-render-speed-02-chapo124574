@@ -744,6 +744,52 @@ function renderInlineNode(node) {
 // Reset per parse() call; HTML blocks do not set it (n2/n5).
 let inLinkLeak = false;
 
+// Round 4 (doc-09/16/28/35): code-span suppression regions. Marked
+// suppresses '*'/'_' delimiters that sit between two same-length
+// backtick runs even when the first run is inside a link text — so the
+// code span never renders (the backticks stay literal inside the link
+// text) but the delimiters between the runs are still ignored. The
+// pre-scan pairs backtick runs by same length over the raw string,
+// WITHOUT the link-text limit the main scan uses for rendering. It is
+// greedy left-to-right like the main scan: a run pairs with the next
+// run of the same length; an unpaired run is literal. Returns
+// [start, end) intervals, sorted and non-overlapping.
+function codeSpanRegions(str) {
+  const n = str.length;
+  if (str.indexOf('`') < 0) return [];
+  // Mirrors the main scan's code-span matching exactly, minus the
+  // link-text limit: an opener is an UNESCAPED backtick run (escapes
+  // are skipped in the outer scan), but the closer search finds the
+  // first run of the same length whether or not it is escaped — the
+  // main scan's search loop does not skip escapes. (Round 4: skipping
+  // escaped backticks in the closer search over-pairs, e.g. doc-03's
+  // `` ` `` after `deno` pairing with `` ` `` before `npm` across an
+  // escaped `` \` `` and swallowing `***files link***`.)
+  const regions = [];
+  let i = 0;
+  while (i < n) {
+    const c = str[i];
+    if (c === '\\' && i + 1 < n) { i += 2; continue; }
+    if (c !== '`') { i++; continue; }
+    let j = i;
+    while (j < n && str[j] === '`') j++;
+    const run = j - i;
+    let k = j, found = -1;
+    while (k < n) {
+      if (str[k] === '`') {
+        let m = k;
+        while (m < n && str[m] === '`') m++;
+        if (m - k === run) { found = k; break; }
+        k = m;
+      } else k++;
+    }
+    if (found < 0) { i = j; continue; }
+    regions.push([i, found + run]);
+    i = found + run;
+  }
+  return regions;
+}
+
 // The inline parser: string -> HTML fragment (no surrounding <p>).
 function parseInline(s, refs) {
   // Fast path: no markdown syntax, no autolink triggers, no hard break.
@@ -1187,6 +1233,17 @@ function parseInline(s, refs) {
     return end;
   }
 
+  // Round 4 (doc-09/16/28/35): pre-scanned code-span regions for
+  // delimiter suppression (see codeSpanRegions). Regions are sorted
+  // and non-overlapping and `i` only moves forward, so a single
+  // advancing pointer answers the membership test in amortized O(1).
+  const csRegions = codeSpanRegions(s);
+  let csIdx = 0;
+  function inCodeRegion(pos) {
+    while (csIdx < csRegions.length && csRegions[csIdx][1] <= pos) csIdx++;
+    return csIdx < csRegions.length && csRegions[csIdx][0] <= pos && pos < csRegions[csIdx][1];
+  }
+
   let i = 0;
   while (i < n) {
     const c = s[i];
@@ -1290,6 +1347,9 @@ function parseInline(s, refs) {
       const node = N('text', s.slice(i, j));
       appendNode(node);
       canMerge = false; // a delimiter run must not merge with following text
+      // Round 4 (doc-09/16/28/35): a run inside a pre-scanned code-span
+      // region is literal text, not a delimiter — skip registration.
+      if (inCodeRegion(i)) { i = j; continue; }
       const f = flanking(s, i, run);
       const d = { char: c, node: node, len: run, pos: i, canOpen: false, canClose: false };
       if (c === '*') { d.canOpen = f.leftFlanking; d.canClose = f.rightFlanking; }
