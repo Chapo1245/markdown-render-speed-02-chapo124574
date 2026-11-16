@@ -2313,8 +2313,23 @@ function parseBlocks(src) {
     // And it only applies once the block already has content: an
     // unindented FIRST line leaves an empty code block (s1/s3, doc-17/38).
     if ((tp.t === 'code' || tp.t === 'html' || tp.t === 'table') && ci !== open.length - 2) {
+      // Cheap pre-filter for the startsNewBlock call below (the hot
+      // path for fenced code in list items): a line is lazy content
+      // unless it could start a block — i.e. its first non-whitespace
+      // char is a block starter (#, fence, <, >, list marker, digit) or
+      // it has >= 4 columns of leading whitespace (indented code).
+      let maybeBlock = false;
+      if (tp.t === 'code' && tp.fenced && tp.parent && tp.parent.t === 'item' && tp.lines.length > 0 && open.indexOf(tp.parent) > ci) {
+        const rest = cur.rest();
+        let p = 0, col = cur.col;
+        while (p < rest.length && (rest[p] === ' ' || rest[p] === '\t')) {
+          col += rest[p] === '\t' ? 4 - (col % 4) : 1; p++;
+        }
+        const fc = rest[p] || '';
+        maybeBlock = (col - cur.col >= 4) || fc === '' || '#`~<>-+*'.indexOf(fc) >= 0 || (fc >= '0' && fc <= '9');
+      }
       const lazyInItem = tp.t === 'code' && tp.fenced && tp.parent && tp.parent.t === 'item' &&
-        tp.lines.length > 0 && open.indexOf(tp.parent) > ci && !startsNewBlock(cur, tp, false, false);
+        tp.lines.length > 0 && open.indexOf(tp.parent) > ci && (!maybeBlock || !startsNewBlock(cur, tp, false, false));
       if (!lazyInItem) {
         closeBlocksBelow(ci);
         tp = tip();
