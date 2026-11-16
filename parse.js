@@ -232,6 +232,34 @@ function indentCols(s) {
 // a=link, i=image, l=autolink, e=em/strong/del wrapper.
 // Delimiter node: {t:'d', ch, n, orig, o, c}  (o=canOpen, c=canClose)
 
+// A link/image whose text contains a code span with an odd number of
+// inner backtick runs (of a different length than the span's delimiter),
+// where the span is not immediately followed by the link's closing ']',
+// does not form. A span at the very end of the text is fine, as is an
+// even inner count.
+function hasBadCodeSpan(text) {
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    if (text[i] !== '`') { i++; continue; }
+    const run = countRun(text, i, '`');
+    const end = findCodeEnd(text, i + run, run);
+    if (end === -1) { i += run; continue; }
+    let inner = 0;
+    let j = i + run;
+    while (j < end) {
+      if (text[j] === '`') {
+        const r = countRun(text, j, '`');
+        if (r !== run) inner++;
+        j += r;
+      } else j++;
+    }
+    if (inner % 2 === 1 && end + run < n) return true;
+    i = end + run;
+  }
+  return false;
+}
+
 // Parse a link/image starting at src[i] ('[' or '!['). Returns null or
 // {end, href, title, ts, te} where [ts,te) is the link-text source range.
 function tryLink(src, i, isImg, refs) {
@@ -239,9 +267,15 @@ function tryLink(src, i, isImg, refs) {
   const close = findClose(src, i + 1, isImg, refs);
   if (close < 0) return null;
   const after = close + 1;
+  const hasParen = src[after] === '(';
+  // A bad code span kills the link. For an inline link attempt, the
+  // emphasis inside the brackets is also suppressed (failedInline).
+  if (hasBadCodeSpan(src.slice(i + 1, close))) {
+    return hasParen ? { failedInline: true, ts: i + 1, te: close } : null;
+  }
   // inline (dest "title"); if the destination is invalid, fall through to
   // the shortcut reference form (the [text] alone may be a defined ref).
-  if (src[after] === '(') {
+  if (hasParen) {
     const r = parseInlineDest(src, after);
     if (r) return { end: r.end, href: r.href, title: r.title, ts: i + 1, te: close, isImage: isImg };
   }
@@ -250,9 +284,9 @@ function tryLink(src, i, isImg, refs) {
     if (src[after + 1] === ']') {
       const rawText = src.slice(i + 1, close);
       const key = foldLabel(rawText);
-      if (key.length === 0) return null;
+      if (key.length === 0) return hasParen ? { failedInline: true, ts: i + 1, te: close } : null;
       const ref = refs.get(key);
-      if (!ref) return null;
+      if (!ref) return hasParen ? { failedInline: true, ts: i + 1, te: close } : null;
       return { end: after + 2, href: ref.href, title: ref.title, ts: i + 1, te: close, isImage: isImg };
     }
     const lab = scanLabel(src, after + 1);
@@ -261,9 +295,9 @@ function tryLink(src, i, isImg, refs) {
       // [foo][bar] with bar undefined leaves [foo] literal (a later
       // [bar][baz] may still form). Only a malformed label falls through.
       const key = foldLabel(lab.text);
-      if (key.length === 0) return null;
+      if (key.length === 0) return hasParen ? { failedInline: true, ts: i + 1, te: close } : null;
       const ref = refs.get(key);
-      if (!ref) return null;
+      if (!ref) return hasParen ? { failedInline: true, ts: i + 1, te: close } : null;
       return { end: lab.end, href: ref.href, title: ref.title, ts: i + 1, te: close, isImage: isImg };
     }
     // not a defined reference: fall through to the shortcut form below
@@ -272,9 +306,9 @@ function tryLink(src, i, isImg, refs) {
   // escapes in a label do NOT resolve for lookup, so [foo\!] != [foo!]).
   const rawText = src.slice(i + 1, close);
   const key = foldLabel(rawText);
-  if (key.length === 0) return null;
+  if (key.length === 0) return hasParen ? { failedInline: true, ts: i + 1, te: close } : null;
   const ref = refs.get(key);
-  if (!ref) return null;
+  if (!ref) return hasParen ? { failedInline: true, ts: i + 1, te: close } : null;
   return { end: after, href: ref.href, title: ref.title, ts: i + 1, te: close, isImage: isImg };
 }
 
@@ -1001,6 +1035,9 @@ function scanInline(src, refs, noExt) {
   // length 1) closes the virtual span and suppresses emphasis delimiters
   // created after the link.
   const virtuals = [];
+  // Source ranges [ts, te) of failed inline links: emphasis delimiters
+  // created inside one are suppressed.
+  const suppressRanges = [];
   let buf = '';
   let i = 0;
   const n = src.length;
@@ -1055,6 +1092,11 @@ function scanInline(src, refs, noExt) {
     if (ch === '[' || (ch === '!' && src[i + 1] === '[')) {
       const isImg = ch === '!';
       const res = tryLink(src, isImg ? i + 1 : i, isImg, refs);
+      if (res && res.failedInline) {
+        // A failed inline link suppresses emphasis inside its brackets.
+        suppressRanges.push({ ts: res.ts, te: res.te });
+        buf += ch; i++; continue;
+      }
       if (res) {
         flush();
         const kids = scanInline(src.slice(res.ts, res.te), refs, true);
@@ -1076,6 +1118,7 @@ function scanInline(src, refs, noExt) {
       const c = canClose(src, i, run, ch);
       flush();
       const d = { t: 'd', ch, n: run, orig: run, o, c };
+      if (suppressRanges.some(r => i >= r.ts && i < r.te)) d.suppressed = true;
       nodes.push(d); delims.push(d);
       i += run; continue;
     }
