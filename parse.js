@@ -1677,9 +1677,12 @@ function parseParagraph(lines, i, refs, ctx) {
     // columns loses 4 of them (the indented-code indent is stripped even
     // though the line stays part of the paragraph). At the top level the
     // indentation is preserved. A lazy-setext line keeps its prepended
-    // spaces (they are content, not indentation).
-    if (j > i && ctx !== 'top' && ind >= 4 && !lines[j].lazySetext) {
-      plines.push({ s: sliceCol(lines[j].s, 4), nl: lines[j].nl });
+    // spaces (they are content, not indentation). In a blockquote, the
+    // strip applies only to lazy lines: a line that carried a `>` marker
+    // keeps its indentation as content.
+    if (j > i && ctx !== 'top' && ind >= 4 && !lines[j].lazySetext &&
+        (ctx === 'list' || lines[j].lazy)) {
+      plines.push({ s: stripIndentKeepTabs(lines[j].s, 4), nl: lines[j].nl });
     } else {
       plines.push(lines[j]);
     }
@@ -1788,7 +1791,7 @@ function parseQuote(lines, i, refs) {
     if (isHr(s)) break;
     if (htmlBlockType(s) >= 1 && htmlBlockType(s) <= 6) break;
     if (listMarker(s) !== null) break;
-    const innerLines = inner.map(l => ({ s: l.s, nl: l.nl, lazySetext: l.lazySetext }));
+    const innerLines = inner.map(l => ({ s: l.s, nl: l.nl, lazySetext: l.lazySetext, lazy: l.lazy }));
     if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
     const parsed = parseBlocks(innerLines, refs, 'quote');
     if (!lastBlockIsPara(parsed)) break;
@@ -1809,7 +1812,7 @@ function parseQuote(lines, i, refs) {
     inner.push({ s: text, nl: ln.nl, lazy: true, lazySetext });
     j++;
   }
-  const innerLines = inner.map(l => ({ s: l.s, nl: l.nl, lazySetext: l.lazySetext }));
+  const innerLines = inner.map(l => ({ s: l.s, nl: l.nl, lazySetext: l.lazySetext, lazy: l.lazy }));
   if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
   const ch = parseBlocks(innerLines, refs, 'quote');
   return { node: { t: 'quote', ch }, next: j };
