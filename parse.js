@@ -2212,6 +2212,11 @@ function parseBlocks(src) {
     // Phase 1: container continuation
     let ci = 0;
     let stoppedAtList = false;
+    // Absolute column of the innermost blockquote '>' marker matched on
+    // this line (-1 when the line is not inside a blockquote). Tab stops
+    // in fenced code are measured from that marker, not from the absolute
+    // source column (d1/d3/d5/d6/d2; e1/d7 use the absolute column).
+    let quoteMarkerCol = -1;
     while (ci + 1 < open.length) {
       const child = open[ci + 1];
       if (child.t === 'quote') {
@@ -2219,6 +2224,7 @@ function parseBlocks(src) {
         const save = cur.save();
         cur.skipIndent(3);
         if (cur.cur() === '>') {
+          quoteMarkerCol = cur.col;
           cur.adv();
           if (cur.cur() === ' ') cur.adv();
           else if (cur.cur() === '\t') cur.advCols(1);
@@ -2313,7 +2319,9 @@ function parseBlocks(src) {
         const containerCol = cur.col;
         cur.stripChars(tp.fenceIndent || 0);
         let s = cur.rest();
-        if (containerCol > 0) s = expandLeadingTabs(s, cur.col);
+        // Inside a blockquote, tab stops are measured from the innermost
+        // '>' marker (quoteMarkerCol); otherwise from the absolute column.
+        if (containerCol > 0) s = expandLeadingTabs(s, quoteMarkerCol >= 0 ? cur.col - quoteMarkerCol : cur.col);
         tp.lines.push({ s: s, nl: curLine.nl });
       }
       continue;
