@@ -1696,24 +1696,10 @@ function splitTableRow(line) {
   while (i < n) {
     const c = line[i];
     if (c === '\\' && i + 1 < n) { cur += c + line[i + 1]; i += 2; continue; }
-    if (c === '`') {
-      let j = i;
-      while (j < n && line[j] === '`') j++;
-      const run = j - i;
-      let k = j, found = -1;
-      while (k < n) {
-        if (line[k] === '`') {
-          let m = k;
-          while (m < n && line[m] === '`') m++;
-          if (m - k === run) { found = k; break; }
-          k = m;
-        } else k++;
-      }
-      if (found < 0) { cur += line.slice(i, j); i = j; continue; }
-      cur += line.slice(i, found + run);
-      i = found + run;
-      continue;
-    }
+    // A '|' always splits the cell (unless escaped as '\|'). Code spans
+    // do NOT protect a '|' during splitting (t1-t5/doc-18): the row is
+    // split first and each cell's inline content (incl. code spans) is
+    // parsed afterwards. Backticks are ordinary characters here.
     if (c === '|') { cells.push(cur); cur = ''; i++; continue; }
     cur += c; i++;
   }
