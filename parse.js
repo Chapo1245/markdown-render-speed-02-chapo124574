@@ -712,6 +712,14 @@ function renderInlineNode(node) {
   }
 }
 
+// Marked quirk: an opening <a> tag in inline content (even a self-closing
+// <a />) sets an "inside a link" flag that is NOT reset at the end of the
+// block — it leaks into later blocks and suppresses GFM autolinks (bare
+// scheme, www., email) until a closing </a> is seen (n1/n4/o1-o4, doc-33).
+// Angle autolinks <...> and inline links [...]() are NOT suppressed.
+// Reset per parse() call; HTML blocks do not set it (n2/n5).
+let inLinkLeak = false;
+
 // The inline parser: string -> HTML fragment (no surrounding <p>).
 function parseInline(s, refs) {
   // Fast path: no markdown syntax, no autolink triggers, no hard break.
@@ -1276,7 +1284,10 @@ function parseInline(s, refs) {
           node.ch = [N('text', a.text)];
           appendNode(node);
         } else {
-          appendNode(N('html', s.slice(i, a.end)));
+          const tagText = s.slice(i, a.end);
+          if (/^<\/a(?:[\s>]|$)/i.test(tagText)) inLinkLeak = false;
+          else if (/^<a(?:[\s/>]|$)/i.test(tagText)) inLinkLeak = true;
+          appendNode(N('html', tagText));
         }
         i = a.end;
         continue;
@@ -1297,7 +1308,7 @@ function parseInline(s, refs) {
       i++;
       continue;
     }
-    if (c === 'w' && s.startsWith('www.', i) && prevAllowsExt(s, i)) {
+    if (c === 'w' && s.startsWith('www.', i) && prevAllowsExt(s, i) && !inLinkLeak) {
       const w = tryWww(s, i, hasActiveBracket());
       if (w) {
         const node = N('link', w.text);
@@ -1312,7 +1323,7 @@ function parseInline(s, refs) {
     if (c === ':' && s[i + 1] === '/' && s[i + 2] === '/') {
       const sc = trySchemeSlash(s, i, hasActiveBracket());
       const last = lastHeadText();
-      if (sc && prevAllowsExt(s, sc.schemeStart) && last &&
+      if (sc && !inLinkLeak && prevAllowsExt(s, sc.schemeStart) && last &&
           last.s.endsWith(s.slice(sc.schemeStart, i))) {
         last.s = last.s.slice(0, last.s.length - (i - sc.schemeStart));
         if (last.s === '') removeNode(last);
@@ -1348,7 +1359,7 @@ function parseInline(s, refs) {
       // it is not a real local-part char: no autolink (cm-606).
       if (st < i && prevAllowsExt(s, st) && s[st - 1] !== '\\') {
         const em = tryEmail(s, st, isEmCloserPos);
-        if (em && em.end > i && cutTrailingText(s.slice(st, i))) {
+        if (em && !inLinkLeak && em.end > i && cutTrailingText(s.slice(st, i))) {
           const node = N('link', em.text);
           node.dest = 'mailto:' + em.text;
           node.auto = true; // GFM autolink: dissolves to text inside a link
@@ -2537,6 +2548,7 @@ function renderItem(item, tight, refs) {
 export function parse(src) {
   if (typeof src !== 'string') src = String(src);
   src = src.replace(/\r\n?/g, '\n').replace(/\u0000/g, '\uFFFD');
+  inLinkLeak = false;
   const { doc, refs } = parseBlocks(src);
   let out = '';
   for (const c of doc.ch) out += renderBlock(c, refs);
