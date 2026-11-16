@@ -2331,7 +2331,7 @@ function parseBlocks(src) {
       const containerCol = cur.col;
       if (cur.advCols(4)) {
         let s = cur.rest();
-        if (containerCol > 0) s = expandLeadingTabs(s, cur.col);
+        if (containerCol > 0) s = expandLeadingTabs(s, quoteMarkerCol >= 0 ? cur.col - quoteMarkerCol : cur.col);
         tp.lines.push({ s: s, nl: curLine.nl });
         continue;
       }
@@ -2385,8 +2385,9 @@ function parseBlocks(src) {
         lineText = stripItemParaIndent(lineText, cur.col);
       } else if (cur.col > 0) {
         // Inside a container (e.g. a blockquote) leading tabs expand to
-        // spaces; at top level they stay raw.
-        lineText = expandLeadingTabs(lineText, cur.col);
+        // spaces; at top level they stay raw. Inside a blockquote the
+        // tab stops are measured from the innermost '>' marker.
+        lineText = expandLeadingTabs(lineText, quoteMarkerCol >= 0 ? cur.col - quoteMarkerCol : cur.col);
       }
       addParaLine(tp2, lineText);
       continue;
