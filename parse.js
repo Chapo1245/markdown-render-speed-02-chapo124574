@@ -259,6 +259,49 @@ function expandTabs(s, col) {
   return out;
 }
 
+// Space-columns from the cursor to the first non-space char, with tab
+// widths measured from stripped column `base` — the cursor's column in
+// the line after container prefixes are removed (a blockquote prefix
+// consumes a different number of raw columns on each line, so raw
+// columns are meaningless for list-item continuation). Does not mutate.
+function cSpacesStripped(c, base) {
+  let n = 0, k = c.i, tab = c.tab, col = base;
+  for (;;) {
+    if (tab > 0) { n += tab; col += tab; k++; tab = 0; }
+    else {
+      const ch = c.s[k];
+      if (ch === ' ') { n++; k++; col++; }
+      else if (ch === '\t') { const w = 4 - (col % 4); n += w; col += w; k++; }
+      else break;
+    }
+  }
+  return n;
+}
+// Consume up to n space-columns, with tab widths measured from stripped
+// column `base`. c.col advances by the stripped columns consumed, so
+// later measurements stay in stripped coordinates. A tab partly
+// consumed leaves its stripped remainder in c.tab (so cRest() renders
+// the right number of spaces).
+function cSkipStripped(c, n, base) {
+  let done = 0, col = base;
+  while (done < n) {
+    if (c.tab > 0) {
+      const take = Math.min(n - done, c.tab);
+      c.tab -= take; c.col += take; done += take; col += take;
+      if (c.tab === 0) c.i++;
+    } else {
+      const ch = c.s[c.i];
+      if (ch === ' ') { c.i++; c.col++; done++; col++; }
+      else if (ch === '\t') {
+        const w = 4 - (col % 4);
+        const take = Math.min(n - done, w);
+        c.col += take; done += take; col += take;
+        if (take === w) c.i++; else c.tab = w - take;
+      } else break;
+    }
+  }
+  return done;
+}
 function cSkip(c, n) {
   let done = 0;
   while (done < n) {
@@ -425,7 +468,11 @@ class BP {
     // is blank. Only a real blank line counts for list tightness.
     this.rawBlank = cIsBlank(c);
     // ---- Phase 1a: match open containers.
+    // strippedCol is the cursor's column in the line after container
+    // prefixes are removed: 0 after a blockquote marker is consumed,
+    // and it grows by each list item's stripped content indent.
     let idx = 1;
+    let strippedCol = 0;
     let matchedAll = true;
     while (idx < this.stack.length) {
       const b = this.stack[idx];
@@ -442,6 +489,7 @@ class BP {
           cAdv(c);
           const nx = cPeek(c);
           if (nx === ' ' || nx === '\t') { cAdv1(c); this.markerSpace = true; }
+          strippedCol = 0; // the marker is stripped from the line
           idx++;
           continue;
         }
@@ -457,16 +505,21 @@ class BP {
           matchedAll = false;
           break;
         }
-        const need = b.indent - c.col;
-        if (need <= 0) { idx++; continue; }
-        // Restore the cursor if the item does not match: the spaces
-        // skipped here belong to the line, not to the item (cm-255:
-        // " two" keeps its space as a top-level paragraph; cm-257:
-        // "     two" stays indented code).
-        const si = c.i, scol = c.col, stab = c.tab;
-        cSkip(c, need);
-        if (c.col >= b.indent) { idx++; continue; }
-        c.i = si; c.col = scol; c.tab = stab;
+        // The item continues only if the line, after the container
+        // prefixes are stripped, is indented by the item's stripped
+        // content indent (cm-259: ">>     two" has 4 spaces after the
+        // markers, matching the item's stripped indent 4; cm-260:
+        // "  >  > two" has 0 spaces after the markers, below the
+        // item's stripped indent 2, so it leaves the list; cm-257:
+        // "     two" has 5 spaces, below the stripped indent 6).
+        // Tabs expand from the stripped column, so a tab that reaches
+        // the content indent is consumed whole (cm-004).
+        if (cSpacesStripped(c, strippedCol) >= b.sIndent) {
+          cSkipStripped(c, b.sIndent, strippedCol);
+          strippedCol += b.sIndent;
+          idx++;
+          continue;
+        }
         matchedAll = false;
         break;
       }
@@ -1193,6 +1246,17 @@ BP.prototype.addBlocks = function (c, L) {
       }
       const item = newNode('item', list);
       item.indent = b.contentIndent;
+      // Stripped content indent: the content indent measured in the
+      // line after container prefixes are removed. c.col here is the
+      // number of columns consumed by container prefixes on this
+      // line, so subtracting it converts the absolute content indent
+      // to stripped coordinates. This is what makes cm-259 work
+      // (">>     two" has 4 spaces after the markers, matching the
+      // item's stripped indent 4) while cm-257 does not match
+      // ("     two" has 5 spaces, below the stripped indent 6) and
+      // cm-295's "  - baz" does not continue the " - bar" item
+      // (2 spaces, below its stripped indent 3).
+      item.sIndent = b.contentIndent - c.col;
       this.childStarted(list);
       this.stack.push(item);
       this.consumeListMarker(c, b);
