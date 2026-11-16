@@ -2049,6 +2049,10 @@ function parseBlocks(src) {
       //   style/textarea, comment, PI, declaration, CDATA): strip ONLY
       //   when the next source line is truly empty; a whitespace-only
       //   separator keeps the newline (w1/y3/y5/t31/t41/t51).
+      //   Round 4 (doc-30): a next line that is blank only after
+      //   container markers are stripped (e.g. a lone `>` blockquote
+      //   line) also counts as empty — it is not a whitespace-only
+      //   separator, it is a blank line in context.
       // - type 6 (block tags): strip whenever the block does not run to EOF.
       // - type 7 (single complete tag): strip iff the next line is blank.
       if (lit.endsWith('\n')) {
@@ -2059,7 +2063,7 @@ function parseBlocks(src) {
           if (next && next.s.trim() === '') lit = lit.slice(0, -1);
         } else {
           const next = lines[b.lastLine + 1];
-          if (next && next.s === '') lit = lit.slice(0, -1);
+          if (next && (next.s === '' || /^[ \t>]*>[ \t>]*$/.test(next.s))) lit = lit.slice(0, -1);
         }
       }
       b.literal = lit;
@@ -2360,7 +2364,16 @@ function parseBlocks(src) {
           quoteMarkerCol = cur.col;
           cur.adv();
           if (cur.cur() === ' ') cur.adv();
-          else if (cur.cur() === '\t') cur.advCols(1);
+          // A tab right after '>' expands RELATIVE to the '>' marker
+          // (y5/doc-30): its width is 4 - ((col - markerCol) % 4), and
+          // the quote consumes 1 column of it. With absolute columns a
+          // '>' at col 7 would leave 3 spaces (`>\tindented` -> 3);
+          // marked leaves 2. (For a '>' at col 0 the two agree, cm-006.)
+          else if (cur.cur() === '\t') {
+            const w = 4 - ((cur.col - quoteMarkerCol) % 4);
+            if (w <= 1) cur.adv();
+            else { cur.pend = w - 1; cur.col += 1; }
+          }
           ci++; continue;
         }
         cur.restore(save);
