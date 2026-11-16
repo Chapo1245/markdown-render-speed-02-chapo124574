@@ -423,6 +423,30 @@ function scanExtPath(s, i, stopAtBracket) {
     // ']' too), so it does not stop the scan.
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '<' || c === '>' || c < ' ') break;
     if (stopAtBracket && c === ']' && (s[j + 1] === '(' || s[j + 1] === '[')) break;
+    // A '(' only joins the URL when its matching ')' appears before
+    // the candidate ends (doc-08): `https://a.io)](https://b.io/x y`
+    // links `https://a.io)]` — the '(' before the second URL never
+    // closes, so the URL stops before it. A closed group such as
+    // `(business)` in gfm-625, or `](https://…)` closed by a later
+    // ')' (doc-12/22/36/37), stays. Across all 3887 bare autolinks
+    // in the practice set, none contains an unclosed '('.
+    if (c === '(') {
+      let depth = 1, k = j + 1, closed = false;
+      while (k < n) {
+        const d = s[k];
+        if (d === ' ' || d === '\t' || d === '\n' || d === '\r' || d === '<' || d === '>' || d < ' ') break;
+        if (stopAtBracket && d === ']' && (s[k + 1] === '(' || s[k + 1] === '[')) break;
+        if (d === '&') {
+          let q = k + 1;
+          while (q < n && isAlnum(s[q])) q++;
+          if (q > k + 1 && q < n && s[q] === ';') break;
+        }
+        if (d === '(') depth++;
+        else if (d === ')') { depth--; if (depth === 0) { closed = true; break; } }
+        k++;
+      }
+      if (!closed) break;
+    }
     // stop before an entity-like &name; (e.g. &hl;)
     if (c === '&') {
       let k = j + 1;
