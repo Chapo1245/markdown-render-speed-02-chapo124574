@@ -787,13 +787,12 @@ function processEmphasis(nodes, delims) {
             !(cand.orig % 3 === 0 && cur.orig % 3 === 0)) {
           cand = cand.dp; continue;
         }
-        // Blocked opener: skip it when the use would equal the block use.
+        // Blocked opener: a can-both closer that formed emphasis taints
+        // the nearest earlier opener; the next closer skips it entirely
+        // (regardless of use) and tries a farther opener.
         if (cand === blocked) {
-          const u = cur.ch === '~' ? cur.n : (cand.n >= 2 && cur.n >= 2 ? 2 : 1);
-          if (u === blockUse) {
-            blocked = null; blockUse = 0;
-            cand = cand.dp; continue;
-          }
+          blocked = null; blockUse = 0;
+          cand = cand.dp; continue;
         }
         opener = cand; break;
       }
