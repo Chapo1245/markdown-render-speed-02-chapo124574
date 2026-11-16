@@ -908,6 +908,7 @@ function processEmphasis(nodes, delims) {
   let blocked = null;
   let blockUse = 0;
   let blockBudget = 0;
+  let blockSetter = null;
   let cur = delims[0];
   while (cur) {
     if (!cur.c || cur.n === 0 || cur.suppressed) { cur = cur.dn; continue; }
@@ -933,15 +934,17 @@ function processEmphasis(nodes, delims) {
         // or an exhausted budget). Otherwise it is blocked (consuming one
         // from the budget) and may only match a farther opener with a
         // strictly larger use than it would have had with the tainted one.
-        if (cand === blocked) {
+        // The closer that set the taint is exempt: its own leftover is
+        // not blocked by the taint it just set.
+        if (cand === blocked && cur !== blockSetter) {
           const u = cur.ch === '~' ? cur.n : (cand.n >= 2 && cur.n >= 2 ? 2 : 1);
           if (u > blockUse && (cur.orig !== cand.orig || blockBudget === 0)) {
-            blocked = null; blockUse = 0; blockBudget = 0;
+            blocked = null; blockUse = 0; blockBudget = 0; blockSetter = null;
             opener = cand; break;
           }
           if (blockBudget > 0) {
             blockBudget--;
-            if (blockBudget === 0) { blocked = null; blockUse = 0; }
+            if (blockBudget === 0) { blocked = null; blockUse = 0; blockSetter = null; }
           }
           taintedUse = u;
           cand = cand.dp; continue;
@@ -970,7 +973,7 @@ function processEmphasis(nodes, delims) {
     for (let d = opener.dn; d && d !== cur; d = d.dn) d.enclosed = true;
     // Emphasis formed at a different opener clears a pending blocker
     // (set by an earlier match).
-    if (blocked && opener !== blocked) { blocked = null; blockUse = 0; blockBudget = 0; }
+    if (blocked && opener !== blocked) { blocked = null; blockUse = 0; blockBudget = 0; blockSetter = null; }
     // Set a blocker when a can-both closer matches a canOpen-only opener
     // and the nearest earlier opener has a different original length.
     if (cur.o && cur.c && opener.o && !opener.c) {
@@ -983,6 +986,7 @@ function processEmphasis(nodes, delims) {
         blocked = outer;
         blockUse = use;
         blockBudget = use;
+        blockSetter = cur;
       }
     }
     const inner = nodes.slice(oi + 1, ci);
