@@ -2208,7 +2208,12 @@ function parseBlocks(src) {
     const container = open[ci];
     const walkStoppedEarly = ci < open.length - 1;
     const blank = cur.blank();
-    if (blank) {
+    // A line of leading spaces + exactly one tab inside a table is an
+    // empty table row in marked (doc-07/doc-37: a `\t`-only line after
+    // the last row adds a row of empty cells), not a blank line. A
+    // spaces-only, empty, or multi-tab line still ends the table.
+    const tabTableRow = tip().t === 'table' && /^ *\t$/.test(cur.rest());
+    if (blank && !tabTableRow) {
       // A whitespace-only (non-empty) remainder on the last line continues
       // an open paragraph whose container was reached (e.g. `> foo` then
       // `>  ` at EOF keeps a single-space line in the paragraph).
