@@ -986,7 +986,7 @@ function processEmphasis(nodes, delims) {
       }
     }
     const inner = nodes.slice(oi + 1, ci);
-    const eNode = { t: 'e', tag, ch: inner, use, openableCloser: cur.o };
+    const eNode = { t: 'e', tag, ch: inner, use, openableCloser: cur.o, dch: cur.ch };
     opener.n -= use;
     cur.n -= use;
     const seg = [];
@@ -994,14 +994,15 @@ function processEmphasis(nodes, delims) {
     seg.push(eNode);
     if (cur.n > 0) {
       // Leftover closer goes INSIDE a strong when the strong contains an
-      // inner em/del with use 1 whose closer was openable: the leftover
-      // becomes literal text at the end of the strong's content.
+      // inner em/del with use 1 whose closer was openable AND which uses
+      // the same delimiter character as the strong: the leftover becomes
+      // literal text at the end of the strong's content.
       let inside = false;
       if (tag === 'strong') {
         const stack = [...inner];
         while (stack.length > 0) {
           const nd = stack.pop();
-          if (nd.t === 'e' && nd.use === 1 && nd.openableCloser) { inside = true; break; }
+          if (nd.t === 'e' && nd.use === 1 && nd.openableCloser && nd.dch === cur.ch) { inside = true; break; }
           if (nd.t === 'e' && nd.ch) stack.push(...nd.ch);
         }
       }
