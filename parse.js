@@ -300,7 +300,8 @@ function scanLabel(src, i) {
 function findClose(src, i, isImg, refs) {
   const n = src.length;
   let depth = 1;
-  const stack = [isImg ? 1 : 0]; // 1=image opener, 0=link opener
+  // stack of openers: {pos, isImg} for the outer opener then inner ones.
+  const stack = [{ pos: i - 1, isImg }];
   let j = i;
   while (j < n) {
     const ch = src[j];
@@ -322,16 +323,26 @@ function findClose(src, i, isImg, refs) {
     }
     if (ch === '[') {
       depth++;
-      stack.push(src[j - 1] === '!' ? 1 : 0);
+      stack.push({ pos: j, isImg: src[j - 1] === '!' });
       j++; continue;
     }
     if (ch === ']') {
       depth--;
       if (depth === 0) return j;
-      const innerIsImg = stack.pop() === 1;
-      if (!isImg && !innerIsImg) {
-        // would this ']' form an inner link? if so the outer link aborts
-        if (linkSuffixForms(src, j + 1, refs)) return -1;
+      const inner = stack.pop();
+      if (!isImg && !inner.isImg) {
+        // Would this ']' close an inner link? If the inner opener forms
+        // a link, the outer link attempt aborts. The inner form depends
+        // on its suffix: inline dest, full ref (defined label only),
+        // collapsed [] (text label defined), or shortcut (text defined).
+        const nxt = src[j + 1];
+        let aborts = false;
+        if (nxt === '(') aborts = linkSuffixForms(src, j + 1, refs);
+        else if (nxt === '[') {
+          if (src[j + 2] === ']') aborts = refs.has(foldLabel(src.slice(inner.pos + 1, j)));
+          else aborts = linkSuffixForms(src, j + 1, refs);
+        } else aborts = refs.has(foldLabel(src.slice(inner.pos + 1, j)));
+        if (aborts) return -1;
       }
       j++; continue;
     }
