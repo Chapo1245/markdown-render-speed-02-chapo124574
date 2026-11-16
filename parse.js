@@ -1349,7 +1349,10 @@ function parseInline(s, refs) {
       canMerge = false; // a delimiter run must not merge with following text
       // Round 4 (doc-09/16/28/35): a run inside a pre-scanned code-span
       // region is literal text, not a delimiter — skip registration.
-      if (inCodeRegion(i)) { i = j; continue; }
+      // But NOT inside a link text: link text is tokenized recursively
+      // in isolation, so a code span outside it never suppresses its
+      // delimiters (doc-35 `*fast*` in `[default run*fast*](...)`).
+      if (inCodeRegion(i) && !hasActiveBracket()) { i = j; continue; }
       const f = flanking(s, i, run);
       const d = { char: c, node: node, len: run, pos: i, canOpen: false, canClose: false };
       if (c === '*') { d.canOpen = f.leftFlanking; d.canClose = f.rightFlanking; }
