@@ -1057,10 +1057,12 @@ function scanInline(src, refs, noExt) {
       const run = countRun(src, i, '`');
       // A later backtick run closes a pending virtual code-span opener
       // (from an unclosed run inside a link/image text) and suppresses
-      // emphasis delimiters created after that link.
+      // emphasis delimiters created after that link. A run before any
+      // such delimiter does not consume the opener: the virtual span
+      // extends to the run that follows the emphasis.
       for (let v = virtuals.length - 1; v >= 0; v--) {
         const V = virtuals[v].len;
-        if (V >= 2 && V % 2 === 0 && (run === V || run === 1)) {
+        if (V >= 2 && V % 2 === 0 && (run === V || run === 1) && delims.length > virtuals[v].delimIdx) {
           for (let d = virtuals[v].delimIdx; d < delims.length; d++) delims[d].suppressed = true;
           virtuals.splice(v, 1);
         }
