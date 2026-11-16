@@ -2303,7 +2303,9 @@ function parseBlocks(src) {
         // consumed columns), leading tabs in the remainder expand to
         // spaces at tab stops; at top level they stay raw tabs.
         const containerCol = cur.col;
-        cur.stripChars(tp.fenceIndent || 0);
+        // Only backtick fences strip the fence indent from content lines;
+        // tilde fences keep the full indent (j1/j4 vs j2/j3, doc-29).
+        if (tp.fenceCh === '`') cur.stripChars(tp.fenceIndent || 0);
         let s = cur.rest();
         // Inside a blockquote, tab stops are measured from the innermost
         // '>' marker (quoteMarkerCol); otherwise from the absolute column.
