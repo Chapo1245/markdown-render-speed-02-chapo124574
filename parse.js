@@ -2300,9 +2300,19 @@ function parseBlocks(src) {
     }
     let tp = tip();
     // A leaf block only consumes a line that continues its containers.
+    // A fenced code block directly inside a list item is different: its
+    // raw content lines keep coming even when they do not match the
+    // item's indent (q1/q2/q6, doc-22/doc-26) — a lazy continuation of the
+    // item. It only closes when the line starts a new block (q4) or is
+    // blank (handled above). A code block inside a blockquote does NOT
+    // get this: it closes when the '>' is missing (the quote is not lazy).
     if ((tp.t === 'code' || tp.t === 'html' || tp.t === 'table') && ci !== open.length - 2) {
-      closeBlocksBelow(ci);
-      tp = tip();
+      const lazyInItem = tp.t === 'code' && tp.fenced && tp.parent && tp.parent.t === 'item' &&
+        open.indexOf(tp.parent) > ci && !startsNewBlock(cur, tp, false, false);
+      if (!lazyInItem) {
+        closeBlocksBelow(ci);
+        tp = tip();
+      }
     }
     // Leaf blocks that consume the line themselves.
     if (tp.t === 'code' && tp.fenced) {
