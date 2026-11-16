@@ -952,6 +952,14 @@ function parseInline(s, refs) {
   function processEmphasis(closerIdx) {
     let closer = delims[closerIdx];
     if (!closer) return;
+    // Round 4 (doc-11 frag-2, doc-30): the strong most recently formed
+    // by this closer, plus whether its inner em/strong closer can open
+    // (P). The leftover is moved inside it ONLY after the loop ends
+    // with the closer still unconsumed (no opener left for it) — moving
+    // it during the loop breaks the parent check, so an outer opener
+    // (`__because may __old 2*3*4 and____`, doc-05) can no longer pair
+    // with the remaining run.
+    let lastStrong = null;
     while (closer && closer.len > 0) {
       const ci = delims.indexOf(closer);
       let openerIdx = -1;
@@ -1015,6 +1023,10 @@ function parseInline(s, refs) {
       // openPos is the opener's source position (for the detached
       // check in innerStrongCanOpen).
       formedEm.push({ pos: closer.pos, openPos: opener.pos, char: closer.char, len: closer.len + use, use, canOpen: closer.canOpen });
+      // Track the strong this closer just formed (for the deferred
+      // leftover move below). An em formation resets it: an em's
+      // leftover always goes outside (doc-04/20/27).
+      lastStrong = use === 2 ? { node: emph, p: innerEmCanOpen(opener.pos, closer.pos) } : null;
       const mid = [];
       if (opener.node.s !== '') mid.push(opener.node);
       mid.push(emph);
@@ -1026,6 +1038,24 @@ function parseInline(s, refs) {
         const cix = delims.indexOf(closer);
         if (cix >= 0) delims.splice(cix, 1);
         break;
+      }
+    }
+    // Deferred leftover move (doc-11 frag-2, doc-30): the closer still
+    // has unused delimiters and no opener left for them, so they are
+    // literal text. When the strong it last formed sits over an inner
+    // em/strong whose closer can open (P), that text goes INSIDE the
+    // strong (`**return that *old*two***` ->
+    // `<strong>return that <em>old</em>two*</strong>`); otherwise it
+    // stays after it (`**foo***` -> `<strong>foo</strong>*`, cm-446).
+    if (closer && closer.len > 0 && lastStrong && lastStrong.p) {
+      const p = lastStrong.node.parent;
+      const arr = p.ch;
+      const si = arr.indexOf(lastStrong.node);
+      const ci3 = arr.indexOf(closer.node);
+      if (si >= 0 && ci3 === si + 1) {
+        arr.splice(ci3, 1);
+        closer.node.parent = lastStrong.node;
+        lastStrong.node.ch.push(closer.node);
       }
     }
   }
