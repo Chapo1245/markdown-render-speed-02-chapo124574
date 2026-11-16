@@ -724,6 +724,13 @@ function parseInline(s, refs) {
   head.ch = [];
   let canMerge = false; // true iff the last child of head is a text node we may append to
   const delims = [];
+  // Closers of emphasis nodes already formed, in formation order:
+  // {pos, char, len, canOpen}. Used by the marked emphasis rule below:
+  // when a '*' closer that closed an inner em is followed by a letter
+  // (canOpen), a later lone '*' never pairs with a '**' opener, and a
+  // '**' closer never pairs with a '**' opener unless the lone '*'
+  // is a closer-only (see processEmphasis).
+  const formedEm = [];
   const hasBracket = s.indexOf('[') >= 0;
 
   // True when the '_' at position p can close an earlier '_' emphasis
@@ -849,6 +856,33 @@ function parseInline(s, refs) {
     node.parent = p;
   }
 
+  // Marked emphasis deviation (probed, g/h/i series): when an inner
+  // '*' em's closing '*' is followed by a letter (so it can also open,
+  // P=true), a later lone '*' never pairs with a '**' opener, and a
+  // '**' closer never pairs with a '**' opener unless the lone '*' is
+  // a closer-only (Q=true). Strong forms iff P == Q (XNOR).
+  // P: the most recent '*' em closer formed inside (openPos, closePos)
+  //    has canOpen set (its '*' is followed by a letter).
+  function innerEmCanOpen(openPos, closePos) {
+    for (let k = formedEm.length - 1; k >= 0; k--) {
+      const e = formedEm[k];
+      if (e.pos <= openPos) return false;
+      if (e.pos >= closePos) continue;
+      if (e.char === '*' && e.len === 1) return e.canOpen;
+    }
+    return false;
+  }
+  // Q: the first '*' delimiter still pending inside (openPos, closePos)
+  //    (the lone '*' after the inner em). Null when there is no lone '*'.
+  function loneStar(openPos, closePos) {
+    for (let k = 0; k < delims.length; k++) {
+      const d = delims[k];
+      if (d.char !== '*' || d.pos <= openPos || d.pos >= closePos) continue;
+      return d;
+    }
+    return null;
+  }
+
   function processEmphasis(closerIdx) {
     let closer = delims[closerIdx];
     if (!closer) return;
@@ -869,6 +903,20 @@ function parseInline(s, refs) {
         if (d.node.parent !== closer.node.parent) continue;
         // An opener inside a dead link text never forms emphasis.
         if (d.pos !== undefined && inDeadRegion(d.pos)) continue;
+        // Marked '*' rule (see innerEmCanOpen): a lone single '*' closer
+        // never pairs with a '**' opener when the inner em's closing '*'
+        // is followed by a letter (P=true); the '**' closer then pairs
+        // with the '**' opener to form a strong instead (g1/g6).
+        if (closer.char === '*' && closer.len === 1 && d.len >= 2 && innerEmCanOpen(d.pos, closer.pos)) continue;
+        // Marked '*' rule, strong side: a '**' closer never pairs with a
+        // '**' opener when P=true and there IS a lone '*' that is not a
+        // closer-only (Q=false); the '**' pair stays literal
+        // (g4/g5/g8/g10/h5). With no lone '*' at all the strong still
+        // forms (cm-429 `**foo*bar*baz**`), so the rule needs a lone '*'.
+        if (closer.char === '*' && closer.len >= 2 && d.len >= 2 && innerEmCanOpen(d.pos, closer.pos)) {
+          const ls = loneStar(d.pos, closer.pos);
+          if (ls && !(ls.canClose && !ls.canOpen)) continue;
+        }
         openerIdx = k; break;
       }
       if (openerIdx < 0) break;
@@ -887,6 +935,10 @@ function parseInline(s, refs) {
       opener.node.s = opener.node.s.slice(0, opener.node.s.length - use);
       closer.node.s = closer.node.s.slice(use);
       opener.len -= use; closer.len -= use;
+      // Record the closer for the marked '*' rule (innerEmCanOpen).
+      // len is the closer's run length before this pairing consumed
+      // `use` of it, so only single-'*' runs count as inner em closers.
+      formedEm.push({ pos: closer.pos, char: closer.char, len: closer.len + use, canOpen: closer.canOpen });
       const mid = [];
       if (opener.node.s !== '') mid.push(opener.node);
       mid.push(emph);
