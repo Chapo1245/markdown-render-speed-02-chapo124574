@@ -979,7 +979,14 @@ BP.prototype.scanBlockStart = function (c) {
   if (ch === '`' || ch === '~') {
     let n = 0;
     while (cPeek(d) === ch) { cAdv(d); n++; }
-    if (n >= 3) return { kind: 'fence', ch, len: n };
+    if (n >= 3) {
+      // A backtick fence's info string may not contain '`' (cm-145).
+      // If it does, this is not a fence at all — it is paragraph text
+      // (a code span), so return null and let the paragraph continue
+      // (doc-21: "> ```inner backticks```" inside a paragraph).
+      if (ch === '`' && d.s.indexOf('`', d.i) !== -1) return null;
+      return { kind: 'fence', ch, len: n };
+    }
     return null;
   }
   if (ch === '*' || ch === '-' || ch === '_') {
