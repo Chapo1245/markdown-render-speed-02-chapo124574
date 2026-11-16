@@ -409,12 +409,20 @@ function validDomain(dom, minTld) {
   return true;
 }
 // Scan a www/scheme path starting at i (first path char). Returns end index.
-function scanExtPath(s, i) {
+// When stopAtBracket is set, a ']' ends the scan — but only when it
+// looks like a link closer (followed by '(' or '['): a bare ']' with
+// no active opener, or one followed by anything else, is a valid URL
+// character (doc-36, a11/a12).
+function scanExtPath(s, i, stopAtBracket) {
   const n = s.length;
   let j = i;
   while (j < n) {
     const c = s[j];
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '<' || c === '>' || c === ']' || c < ' ') break;
+    // ']' is a valid URL character in an extended autolink (marked
+    // keeps it, even trailing: `https://example.com/foo]` links the
+    // ']' too), so it does not stop the scan.
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '<' || c === '>' || c < ' ') break;
+    if (stopAtBracket && c === ']' && (s[j + 1] === '(' || s[j + 1] === '[')) break;
     // stop before an entity-like &name; (e.g. &hl;)
     if (c === '&') {
       let k = j + 1;
@@ -426,21 +434,26 @@ function scanExtPath(s, i) {
   // Trim trailing punctuation and unbalanced ')' until stable: dropping
   // a ')' can expose a '.' (and vice versa), e.g. `...nova).)` must
   // lose the ')', then the '.', then the unbalanced ')' (doc-10/16).
+  // A trailing ')' is unbalanced only when no '(' is open for it just
+  // before it (paren depth clamped at 0, so an unmatched ')' mid-URL
+  // does not count against a later balanced one, doc-36).
   while (true) {
     while (j > i && '?!.,:;*_~\'"'.indexOf(s[j - 1]) >= 0) j--;
-    let open = 0, close = 0;
-    for (let k = i; k < j; k++) {
-      if (s[k] === '(') open++;
-      else if (s[k] === ')') close++;
+    if (j > i && s[j - 1] === ')') {
+      let depth = 0;
+      for (let k = i; k < j - 1; k++) {
+        if (s[k] === '(') depth++;
+        else if (s[k] === ')' && depth > 0) depth--;
+      }
+      if (depth === 0) { j--; continue; }
     }
-    if (j > i && s[j - 1] === ')' && close > open) { j--; continue; }
     break;
   }
   return j;
 }
 // Try a www. autolink at s[i] (s[i..] starts with 'www.'). prevOk: preceding
 // char allows an autolink. Returns {text, end} or null.
-function tryWww(s, i) {
+function tryWww(s, i, stopAtBracket) {
   const n = s.length;
   let j = i + 4;
   // domain: labels separated by dots
@@ -451,13 +464,13 @@ function tryWww(s, i) {
   while (domEnd > j && s[domEnd - 1] === '.') domEnd--;
   const dom = s.slice(j, domEnd);
   if (!validDomain(dom, 2)) return null;
-  let end = scanExtPath(s, domEnd);
+  let end = scanExtPath(s, domEnd, stopAtBracket);
   if (end === domEnd) end = domEnd; // no path
   return { text: s.slice(i, end), end: end };
 }
 // Try a scheme autolink (s[i] == ':' and s[i+1..2] == '//'), looking back for
 // the scheme start. Returns {text, schemeStart, end} or null.
-function trySchemeSlash(s, i) {
+function trySchemeSlash(s, i, stopAtBracket) {
   const n = s.length;
   let st = i - 1;
   while (st >= 0 && (isAlnum(s[st]) || s[st] === '+' || s[st] === '.' || s[st] === '-')) st--;
@@ -471,7 +484,7 @@ function trySchemeSlash(s, i) {
   while (domEnd > j && s[domEnd - 1] === '.') domEnd--;
   const dom = s.slice(j, domEnd);
   if (!validDomain(dom, 2)) return null;
-  const end = scanExtPath(s, domEnd);
+  const end = scanExtPath(s, domEnd, stopAtBracket);
   return { text: s.slice(st, end), schemeStart: st, end: end };
 }
 // Try a scheme:email autolink (s[i] == ':' and not '//'). Returns
@@ -630,6 +643,20 @@ function plainTextChildren(ch) {
   for (const c of ch) out += plainTextNode(c);
   return out;
 }
+// Dissolve GFM autolinks inside a node tree to plain text (they do not
+// survive inside an outer link). Real (non-auto) links and their
+// subtrees are left alone.
+function dissolveAutoLinks(node) {
+  if (node.t === 'link' && node.auto) {
+    node.t = 'text';
+    node.s = plainTextNode(node);
+    node.ch = [];
+    delete node.dest; delete node.title; delete node.auto;
+    return;
+  }
+  if (node.t === 'link' || !node.ch) return;
+  for (const c of node.ch) dissolveAutoLinks(c);
+}
 // The next node in flat document order after `node`; containers are units.
 function nextFlat(node) {
   let cur = node;
@@ -712,6 +739,16 @@ function parseInline(s, refs) {
     for (let d = delims.length - 1; d >= 0; d--) {
       const dd = delims[d];
       if (dd.char === '_' && dd.len > 0 && dd.canOpen && dd.node.parent === head) return true;
+    }
+    return false;
+  }
+  // True when an active '[' / '![' link opener is pending: a ']' the
+  // URL scan meets is then a link closer, not a URL character.
+  function hasActiveBracket() {
+    if (!hasBracket) return false;
+    for (let d = delims.length - 1; d >= 0; d--) {
+      const dd = delims[d];
+      if ((dd.char === '[' || dd.char === '![') && dd.active) return true;
     }
     return false;
   }
@@ -927,20 +964,16 @@ function parseInline(s, refs) {
     // '![' are left active (see below) so they are tried here and
     // must fail when their text already holds a link (cm-520).
     // A GFM autolink inside the text is different: it dissolves to
-    // plain text when an outer link forms around it (doc-16).
+    // plain text when an outer link forms around it (doc-16), at any
+    // depth (doc-34: inside a <del>), but never inside a nested
+    // real link.
     if (!isImg) {
       for (const node of collected) {
-        if (node.t === 'link' && node.parent === opener.node.parent) {
-          if (node.auto) {
-            node.t = 'text';
-            node.s = plainTextNode(node);
-            node.ch = [];
-            delete node.dest; delete node.title; delete node.auto;
-          } else {
-            opener.active = false; return 0;
-          }
+        if (node.t === 'link' && !node.auto && node.parent === opener.node.parent) {
+          opener.active = false; return 0;
         }
       }
+      for (const node of collected) dissolveAutoLinks(node);
     }
     for (const node of collected) removeNode(node);
     // form the node
@@ -1147,7 +1180,7 @@ function parseInline(s, refs) {
       continue;
     }
     if (c === 'w' && s.startsWith('www.', i) && prevAllowsExt(s, i)) {
-      const w = tryWww(s, i);
+      const w = tryWww(s, i, hasActiveBracket());
       if (w) {
         const node = N('link', w.text);
         node.dest = 'http://' + w.text;
@@ -1159,7 +1192,7 @@ function parseInline(s, refs) {
       }
     }
     if (c === ':' && s[i + 1] === '/' && s[i + 2] === '/') {
-      const sc = trySchemeSlash(s, i);
+      const sc = trySchemeSlash(s, i, hasActiveBracket());
       const last = lastHeadText();
       if (sc && prevAllowsExt(s, sc.schemeStart) && last &&
           last.s.endsWith(s.slice(sc.schemeStart, i))) {
