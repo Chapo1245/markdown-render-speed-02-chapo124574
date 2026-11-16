@@ -1699,12 +1699,18 @@ function stripAutolinkTrailing(s, start, end) {
       if (k >= start && s.charCodeAt(k) === 38 && k + 1 < e - 1) { e = k; continue; }
     }
     if (last === ')') {
-      let open = 0, close = 0;
-      for (let k = start; k < e; k++) {
-        if (s[k] === '(') open++;
-        else if (s[k] === ')') close++;
+      // Strip the trailing ")" only if no unmatched "(" precedes it
+      // (depth clamped at 0, so a ")" before any "(" does not count).
+      // gfm-625 "...Markup+(business))" strips one ")"; doc-10
+      // "(https://.../nova).)" strips both ")"; doc-12
+      // "...page=4)](./docs/create.md)" keeps the final ")" because
+      // the "(" before "./docs" is unmatched.
+      let depth = 0;
+      for (let k = start; k < e - 1; k++) {
+        if (s[k] === '(') depth++;
+        else if (s[k] === ')' && depth > 0) depth--;
       }
-      if (close > open) { e--; continue; }
+      if (depth === 0) { e--; continue; }
     }
     if (last === '?' || last === '!' || last === '.' || last === ',' ||
         last === ':' || last === ';' || last === '*' || last === '_' || last === '~') {
@@ -1717,7 +1723,13 @@ function stripAutolinkTrailing(s, start, end) {
 // www. autolink starting at i (s[i..] begins with "www.").
 // Domain: labels of alnum (with '-' inside, never at the ends), at least
 // two labels (one dot). Optional :port (digits) and /path.
-function parseWwwAutolink(s, i, n) {
+// stopAtBracket: stop the /path at ']' when an active "[" opener could
+// form a link (doc-12/16/19/24: "[module match https://...](#a-is-method)"
+// is one link). When no "[" opener is active (e.g. an inner link already
+// deactivated them), the URL runs through "]" (doc-12: the
+// "https://img.shields.io?q=stable&page=4" autolink's href includes
+// "] (./docs/create.md)").
+function parseWwwAutolink(s, i, n, stopAtBracket) {
   let j = i + 4;
   let labels = 0;
   for (;;) {
@@ -1742,11 +1754,10 @@ function parseWwwAutolink(s, i, n) {
   if (j < n && s.charCodeAt(j) === 47) {
     while (j < n) {
       const c = s.charCodeAt(j);
-      // Stop at ']' so a bare URL inside link text cannot swallow the
-      // link-text terminator and its destination (doc-12/16/19/24:
-      // "[module match https://...](#a-is-method)" is one link, not an
-      // autolink ending at "(#a-is-method").
-      if (c === 32 || c === 9 || c === 10 || c === 60 || c === 93) break;
+      // Stop at ']' only when an active "[" opener could form a link,
+      // so a bare URL inside link text cannot swallow the link-text
+      // terminator and its destination (doc-12/16/19/24).
+      if (c === 32 || c === 9 || c === 10 || c === 60 || (c === 93 && stopAtBracket)) break;
       j++;
     }
   }
@@ -1755,8 +1766,9 @@ function parseWwwAutolink(s, i, n) {
 }
 
 // Scheme autolink starting at i: scheme (2-32 chars) + "://" + the
-// longest run of non-whitespace, non-'<' characters.
-function parseSchemeAutolink(s, i, n) {
+// longest run of non-whitespace, non-'<' characters. stopAtBracket as
+// in parseWwwAutolink.
+function parseSchemeAutolink(s, i, n, stopAtBracket) {
   let j = i;
   while (j < n && isSchemeCode(s.charCodeAt(j))) j++;
   const schemeLen = j - i;
@@ -1767,9 +1779,8 @@ function parseSchemeAutolink(s, i, n) {
   let k = j;
   while (k < n) {
     const c = s.charCodeAt(k);
-    // Stop at ']' so a bare URL inside link text cannot swallow the
-    // link-text terminator and its destination (doc-12/16/19/24).
-    if (c === 32 || c === 9 || c === 10 || c === 60 || c === 93) break;
+    // Stop at ']' only when an active "[" opener could form a link.
+    if (c === 32 || c === 9 || c === 10 || c === 60 || (c === 93 && stopAtBracket)) break;
     k++;
   }
   if (k === j) return null;
@@ -2221,12 +2232,22 @@ function parseInline(text, refs, out) {
     const code = text.charCodeAt(i);
     // Extended autolinks (start with a letter or digit).
     if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)) {
+      // A bare URL stops at "]" only while an active "[" opener could
+      // still form a link; once an inner link deactivated the openers,
+      // the URL runs through "]" (doc-12 nested-link case).
+      let stopAtBracket = false;
+      if (wwwStarts.has(i) || schemeStarts.has(i)) {
+        for (let k = 0; k < delims.length; k++) {
+          const d = delims[k];
+          if ((d.ch === '[' || d.ch === '![') && d.active && !d.removed) { stopAtBracket = true; break; }
+        }
+      }
       if (wwwStarts.has(i)) {
-        const end = parseWwwAutolink(text, i, n);
+        const end = parseWwwAutolink(text, i, n, stopAtBracket);
         if (end !== null) { addAutolink('http://' + text.slice(i, end), i, end); i = end; continue; }
       }
       if (schemeStarts.has(i)) {
-        const end = parseSchemeAutolink(text, i, n);
+        const end = parseSchemeAutolink(text, i, n, stopAtBracket);
         if (end !== null) { addAutolink(text.slice(i, end), i, end); i = end; continue; }
       }
       if (emailStarts.has(i)) {
