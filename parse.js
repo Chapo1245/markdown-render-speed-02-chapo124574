@@ -1153,11 +1153,43 @@ function parseInline(s, refs) {
       let j = i;
       while (j < n && s[j] === '`') j++;
       const run = j - i;
+      // A code span cannot cross a link-text boundary: when this run sits
+      // inside an active '[' opener, its closer must lie before the ']'
+      // that ends that link text (marked parses link text recursively, so
+      // a backtick inside it never pairs with one outside it, z1/doc-16).
+      // The link text ends at the first ']' with an EVEN backtick-run
+      // count from the opener. An odd count means the ']' sits inside a
+      // code span (cm-525 `[foo`](/uri)`) — there the code span DOES
+      // cross the ']' and the link never forms, so no limit applies.
+      // (linkTextBracketOK's lastRunEnd rule is too permissive here: a
+      // run right before the ']' may OPEN a code span, not close one.)
+      let limit = n;
+      for (let d = delims.length - 1; d >= 0; d--) {
+        const dd = delims[d];
+        if ((dd.char === '[' || dd.char === '![') && dd.active) {
+          const cut = dd.char === '![' ? 2 : 1;
+          const from = dd.pos + cut;
+          for (let q = i + 1; q < n; q++) {
+            if (s[q] !== ']') continue;
+            let runs = 0;
+            for (let p = from; p < q; p++) {
+              if (s[p] === '\\') { p++; continue; }
+              if (s[p] === '`') {
+                runs++;
+                while (p < q && s[p] === '`') p++;
+                p--;
+              }
+            }
+            if (runs % 2 === 0) { limit = q; break; }
+          }
+          break;
+        }
+      }
       let k = j, found = -1;
-      while (k < n) {
+      while (k < limit) {
         if (s[k] === '`') {
           let m = k;
-          while (m < n && s[m] === '`') m++;
+          while (m < limit && s[m] === '`') m++;
           if (m - k === run) { found = k; break; }
           k = m;
         } else k++;
