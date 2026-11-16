@@ -294,6 +294,30 @@ function scanLabel(src, i) {
   return null;
 }
 
+// Length of the first unclosed backtick run in text (a run with no later
+// run of the same length to close it), or null. Runs pair up in order:
+// a run closes the most recent pending opener of the same length. Used
+// to detect a "virtual" code-span opener inside link/image text: such a
+// run can pair with a later backtick run in the outer scope and suppress
+// emphasis between them.
+function unclosedBacktickRun(text) {
+  const pending = [];
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    if (text[i] !== '`') { i++; continue; }
+    let j = i;
+    while (j < n && text[j] === '`') j++;
+    const len = j - i;
+    let k = pending.length - 1;
+    while (k >= 0 && pending[k] !== len) k--;
+    if (k >= 0) pending.splice(k, 1);
+    else pending.push(len);
+    i = j;
+  }
+  return pending.length > 0 ? pending[0] : null;
+}
+
 // Find the ']' closing the bracket opened at src[openIdx-1] (openIdx is the
 // index just after '['). Depth counts nested '['; code spans and escapes are
 // skipped. For a link opener (not image), a ']' that would close an inner
@@ -851,7 +875,7 @@ function processEmphasis(nodes, delims) {
   let blockUse = 0;
   let cur = delims[0];
   while (cur) {
-    if (!cur.c || cur.n === 0) { cur = cur.dn; continue; }
+    if (!cur.c || cur.n === 0 || cur.suppressed) { cur = cur.dn; continue; }
     let cand = cur.dp;
     let opener = null;
     // If the nearest opener is tainted (blocked), the closer may only
@@ -859,7 +883,7 @@ function processEmphasis(nodes, delims) {
     // it would have had with the tainted opener.
     let taintedUse = -1;
     while (cand) {
-      if (cand.ch === cur.ch && cand.o && cand.n > 0 && !cand.enclosed) {
+      if (cand.ch === cur.ch && cand.o && cand.n > 0 && !cand.enclosed && !cand.suppressed) {
         // Strikethrough needs matching run lengths.
         if (cur.ch === '~' && cand.n !== cur.n) { cand = cand.dp; continue; }
         if (((cand.o && cand.c) || (cur.o && cur.c)) &&
@@ -971,6 +995,12 @@ function renderNodes(nodes) {
 function scanInline(src, refs, noExt) {
   const nodes = [];
   const delims = [];
+  // Pending "virtual" code-span openers: unclosed backtick runs inside a
+  // link/image text, each {len, delimIdx} where delimIdx is delims.length
+  // when the link was formed. A later backtick run of the same length (or
+  // length 1) closes the virtual span and suppresses emphasis delimiters
+  // created after the link.
+  const virtuals = [];
   let buf = '';
   let i = 0;
   const n = src.length;
@@ -988,6 +1018,16 @@ function scanInline(src, refs, noExt) {
     }
     if (ch === '`') {
       const run = countRun(src, i, '`');
+      // A later backtick run closes a pending virtual code-span opener
+      // (from an unclosed run inside a link/image text) and suppresses
+      // emphasis delimiters created after that link.
+      for (let v = virtuals.length - 1; v >= 0; v--) {
+        const V = virtuals[v].len;
+        if (V >= 2 && V % 2 === 0 && (run === V || run === 1)) {
+          for (let d = virtuals[v].delimIdx; d < delims.length; d++) delims[d].suppressed = true;
+          virtuals.splice(v, 1);
+        }
+      }
       const end = findCodeEnd(src, i + run, run);
       if (end !== -1) {
         let content = src.slice(i + run, end).replace(/\n/g, ' ');
@@ -1020,6 +1060,10 @@ function scanInline(src, refs, noExt) {
         const kids = scanInline(src.slice(res.ts, res.te), refs, true);
         if (res.isImage) nodes.push({ t: 'i', src: res.href, title: res.title, alt: altText(kids) });
         else nodes.push({ t: 'a', href: res.href, title: res.title, ch: kids });
+        // An unclosed backtick run inside the link/image text is a
+        // virtual code-span opener for the outer scope.
+        const vlen = unclosedBacktickRun(src.slice(res.ts, res.te));
+        if (vlen !== null && vlen >= 2 && vlen % 2 === 0) virtuals.push({ len: vlen, delimIdx: delims.length });
         i = res.end; continue;
       }
       if (ch === '!') { buf += '!'; i++; continue; }
