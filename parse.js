@@ -2003,8 +2003,12 @@ function parseBlocks(lines, refs, ctx) {
         if (i >= n) endedAtEof = true;
       }
       let text = htmlLines.join('\n');
-      const nextBlank = i < n && isBlankLine(lines[i]);
-      if (!nextBlank && htmlLines.length > 0 && lines[i - 1].nl) text += '\n';
+      // Trailing newline: kept when the block ends at an end marker or
+      // EOF, unless the next line is truly empty. Dropped when the block
+      // ends at a blank line. (A whitespace-only next line is not empty:
+      // the newline before it is kept.)
+      const nextEmpty = i < n && lines[i].s.length === 0;
+      if (!endedAtBlank && !nextEmpty && htmlLines.length > 0 && lines[i - 1].nl) text += '\n';
       nodes.push({ t: 'html', text });
       continue;
     }
