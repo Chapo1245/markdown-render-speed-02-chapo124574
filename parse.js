@@ -917,8 +917,14 @@ function splitTableRow(line) {
         // Only enter span mode if a closing run of the SAME length exists
         // ahead; otherwise the backticks are literal and '|' still splits
         // (doc-06: "``next`" has a 2-run opener but only a 1-run closer).
+        // The closing run must be in this same cell: an unescaped '|'
+        // before it is a cell boundary, so the backtick is literal and
+        // the '|' splits (doc-03: the "`" after "``used" must not pair
+        // with the "`" before "a" in the next cell). An escaped "\|" is
+        // not a boundary (doc-03 cell "`a \| b`" still forms a span).
         let j = i + run, found = false;
         while (j < n) {
+          if (line[j] === '|' && (j === 0 || line[j - 1] !== '\\')) break;
           if (line[j] === '`') {
             let r2 = 0;
             while (j + r2 < n && line[j + r2] === '`') r2++;
