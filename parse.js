@@ -595,7 +595,12 @@ class BP {
       const blankIsEmpty = c.i >= c.s.length;
       for (let k = this.stack.length - 1; k >= idx; k--) {
         const b = this.stack[k];
-        if (b.t === 'html' && b.endType === 'blank' && blankIsEmpty) b.endedByBlank = true;
+        // A type 6/7 HTML block ending AT this blank line loses its
+        // trailing newline whether the blank line is truly empty or
+        // only whitespace (doc-03: a lone "\t" after "</p>" inside a
+        // <div> drops it). Only an already-ended block (handled below)
+        // needs a truly empty blank line to drop it (doc-15).
+        if (b.t === 'html' && b.endType === 'blank') b.endedByBlank = true;
       }
       // An HTML block that ended on the previous line and is followed
       // by this blank line also loses its trailing newline, for any
@@ -1732,6 +1737,7 @@ function renderBlocks(node, refs, out, tightParent) {
 
 export function parse(markdown) {
   const src = markdown.replace(/\r\n?/g, '\n');
+  inLink = false;
   const bp = new BP(splitLines(src));
   const root = bp.run();
   const refs = collectRefs(root);
@@ -1743,6 +1749,17 @@ export function parse(markdown) {
 // ---------------------------------------------------------------------------
 // Inline parsing
 // ---------------------------------------------------------------------------
+// inLink: set by an inline <a ...> opening tag, cleared by an exact
+// "</a>" closing tag. While set, GFM extended autolinks (email, www,
+// scheme) are NOT created — a marked quirk: the flag is document-global
+// and leaks across paragraphs/blocks until a "</a>" clears it (doc-03:
+// a multi-line <a href="foo\nbar"> paragraph suppresses the email and
+// www autolinks in later paragraphs). It does NOT suppress explicit
+// <...> autolinks or markdown links. Only an opening <a> whose tag name
+// is followed by ' ' or '>' sets it (<a/> and <a\thref do not; <a />
+// does). Only an exact "</a>" clears it (</a > and </a\t> do not).
+let inLink = false;
+
 // Linked-list inline nodes. Kinds:
 //   text  {s, a, b}    raw slice of the paragraph source
 //   code  {s, a, b}    code-span content slice (raw, newlines kept)
@@ -1854,18 +1871,23 @@ function parseWwwAutolink(s, i, n, stopAtBracket) {
     j++;
     while (j < n && isDigitCode(s.charCodeAt(j))) j++;
   }
-  // A backslash directly after the domain (no "/") is part of the URL
-  // (doc-40: "www.flux.com\" links with href "...%5C"); without it the
-  // "\" plus newline would wrongly become a hard break.
-  if (j < n && s.charCodeAt(j) === 92) j++;
-  if (j < n && s.charCodeAt(j) === 47) {
-    while (j < n) {
-      const c = s.charCodeAt(j);
-      // Stop at ']' only when an active "[" opener could form a link,
-      // so a bare URL inside link text cannot swallow the link-text
-      // terminator and its destination (doc-12/16/19/24).
-      if (c === 32 || c === 9 || c === 10 || c === 60 || (c === 93 && stopAtBracket)) break;
-      j++;
+  // After the domain/port, the URL continues with a run of non-space,
+  // non-'<' characters when it starts with '/', '?' (query), '#' or a
+  // backslash: "www.flux.com?!\ " links with the "?!" and the backslash
+  // (doc-37), and "www.flux.com\" links with the backslash (doc-40).
+  // Other punctuation directly after the domain (e.g. "'s") is not
+  // part of the URL.
+  if (j < n) {
+    const c0 = s.charCodeAt(j);
+    if (c0 === 47 || c0 === 63 || c0 === 35 || c0 === 92) {
+      while (j < n) {
+        const c = s.charCodeAt(j);
+        // Stop at ']' only when an active "[" opener could form a link,
+        // so a bare URL inside link text cannot swallow the link-text
+        // terminator and its destination (doc-12/16/19/24).
+        if (c === 32 || c === 9 || c === 10 || c === 60 || (c === 93 && stopAtBracket)) break;
+        j++;
+      }
     }
   }
   const end = stripAutolinkTrailing(s, i, j);
@@ -1919,6 +1941,42 @@ function isEmailStr(s) {
   return true;
 }
 
+// Flanking (canOpen/canClose) of the "_" run containing position p in
+// s, using the same rules as the inline scanner. Used to decide
+// whether a "_" right after an email is an emphasis closer rather
+// than part of the word.
+function underscoreFlank(s, p) {
+  let ks = p;
+  while (ks > 0 && s[ks - 1] === '_') ks--;
+  let ke = p;
+  while (ke + 1 < s.length && s[ke + 1] === '_') ke++;
+  const prev = ks > 0 ? s[ks - 1] : undefined;
+  const next = ke + 1 < s.length ? s[ke + 1] : undefined;
+  const prevWS = prev === undefined || isSpaceCh(prev);
+  const nextWS = next === undefined || isSpaceCh(next);
+  const prevPunct = prev !== undefined && isPunctCh(prev);
+  const nextPunct = next !== undefined && isPunctCh(next);
+  const leftFlank = !nextWS && (!nextPunct || prevWS || prevPunct);
+  const rightFlank = !prevWS && (!prevPunct || nextWS || nextPunct);
+  return {
+    canOpen: leftFlank && (!rightFlank || prevPunct),
+    canClose: rightFlank && (!leftFlank || nextPunct),
+  };
+}
+
+// Whether the single "_" at e (right after an email ending at e, whose
+// start is st) is an emphasis closer for an opener before the email:
+// "_warning when@atlas.example.com_" linkifies (doc-31/34/37/38),
+// while gfm-632's "a.b-c_d@a.b_" does not — its only "_" before the
+// email is intra-word in "c_d" and cannot open.
+function underscoreClosesEmail(s, st, e) {
+  if (!underscoreFlank(s, e).canClose) return false;
+  for (let k = st - 1; k >= 0; k--) {
+    if (s[k] === '_') return underscoreFlank(s, k).canOpen;
+  }
+  return false;
+}
+
 // Precompute extended-autolink candidate starts over the whole text.
 // wwwStarts / schemeStarts: Sets of start indexes. emailStarts: Map of
 // start index -> match end index.
@@ -1948,10 +2006,21 @@ function precomputeAutolinks(s, n) {
     // the char after must not be a word char or '-'; but a '_' that is
     // the first of a "__" run is a strong closer, not part of a word
     // (doc-04/25: "__...because@mark.example.com__" linkifies, while
-    // gfm-632's single trailing "_" in "a.b-c_d@a.b_" does not).
+    // gfm-632's single trailing "_" in "a.b-c_d@a.b_" does not). A
+    // single "_" after the email is also fine when it closes an
+    // emphasis run opened before the email (doc-31/34/37/38).
     if (e < n) {
       const c = s.charCodeAt(e);
-      if ((isWordCode(c) || c === 45) && !(c === 95 && e + 1 < n && s.charCodeAt(e + 1) === 95)) continue;
+      if (c === 95) {
+        // "_" after the email: a "__" run is a strong closer, accept
+        // (doc-04/25); a single "_" is fine only when it closes an
+        // emphasis run opened before the email (doc-31/34/37/38);
+        // otherwise it is part of the word (gfm-632).
+        if (!(e + 1 < n && s.charCodeAt(e + 1) === 95) &&
+            !underscoreClosesEmail(s, st, e)) continue;
+      } else if (isWordCode(c) || c === 45) {
+        continue;
+      }
     }
     const at = m[0].indexOf('@');
     const local = m[0].slice(0, at);
@@ -2337,8 +2406,9 @@ function parseInline(text, refs, out) {
   while (i < n) {
     const ch = text[i];
     const code = text.charCodeAt(i);
-    // Extended autolinks (start with a letter or digit).
-    if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)) {
+    // Extended autolinks (start with a letter or digit). Suppressed
+    // while inside an unclosed inline <a> tag (inLink; see above).
+    if (!inLink && ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122))) {
       // A bare URL stops at "]" only while an active "[" opener could
       // still form a link; once an inner link deactivated the openers,
       // the URL runs through "]" (doc-12 nested-link case).
@@ -2555,6 +2625,13 @@ function parseInline(text, refs, out) {
         const node = inode('html');
         node.s = text; node.a = i; node.b = tagEnd;
         iAppend(root, node);
+        // Track the inLink state for GFM extended autolinks (see above).
+        if (text[i + 1] === '/') {
+          if ((text[i + 2] === 'a' || text[i + 2] === 'A') && text[i + 3] === '>') inLink = false;
+        } else if ((text[i + 1] === 'a' || text[i + 1] === 'A') &&
+            (text[i + 2] === ' ' || text[i + 2] === '>')) {
+          inLink = true;
+        }
         i = tagEnd;
         continue;
       }
