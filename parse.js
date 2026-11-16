@@ -968,6 +968,26 @@ function scanInline(src, refs, noExt) {
           const url = src.slice(i, end);
           flush(); nodes.push({ t: 'l', href: url, text: url }); i = end; continue;
         }
+      } else if ((ch === 'm' && src.startsWith('mailto:', i)) ||
+          (ch === 'x' && src.startsWith('xmpp:', i))) {
+        // Scheme autolink: lowercase mailto:/xmpp: + a valid email (xmpp
+        // may add one /path segment). Preceding char must not be alnum.
+        if (i === 0 || !isAlnum(src[i - 1])) {
+          const schemeLen = ch === 'm' ? 7 : 5;
+          const emailEnd = matchEmail(src, i + schemeLen);
+          if (emailEnd !== -1) {
+            let end = emailEnd;
+            if (ch === 'x' && src[end] === '/') {
+              let k = end + 1;
+              while (k < n && src[k] !== '/' && src[k] !== ' ' && src[k] !== '\t' &&
+                  src[k] !== '\n' && src[k] !== '<' && src[k] !== '"' && src[k] !== "'") k++;
+              while (k > end + 1 && /[?!.,:;*_~'"]/.test(src[k - 1])) k--;
+              if (k > end + 1) end = k;
+            }
+            const url = src.slice(i, end);
+            flush(); nodes.push({ t: 'l', href: url, text: url }); i = end; continue;
+          }
+        }
       } else if (isLocalChar(ch) && (i === 0 || !isLocalChar(src[i - 1]))) {
         const end = matchEmail(src, i);
         if (end !== -1) {
@@ -1891,7 +1911,6 @@ function parseBlocks(lines, refs, ctx) {
           while (i < n && !isBlankLine(lines[i])) {
             const rInd = indentCols(lines[i].s);
             const rS = sliceCol(lines[i].s, Math.min(rInd, 3));
-            if (rS.indexOf('|') === -1) break;
             const cells = splitTableRow(rS).map(c => c.trim());
             while (cells.length < head.length) cells.push('');
             rows.push(cells.slice(0, head.length));
@@ -1969,17 +1988,21 @@ function renderBlocks(nodes, refs) {
         out += '<th' + (a ? ' align="' + a + '"' : '') + '>' +
           renderNodes(scanInline(nd.head[k], refs)) + '</th>\n';
       }
-      out += '</tr>\n</thead>\n<tbody>';
-      for (const row of nd.rows) {
-        out += '<tr>\n';
-        for (let k = 0; k < row.length; k++) {
-          const a = nd.align[k];
-          out += '<td' + (a ? ' align="' + a + '"' : '') + '>' +
-            renderNodes(scanInline(row[k], refs)) + '</td>\n';
+      out += '</tr>\n</thead>\n';
+      if (nd.rows.length > 0) {
+        out += '<tbody>';
+        for (const row of nd.rows) {
+          out += '<tr>\n';
+          for (let k = 0; k < row.length; k++) {
+            const a = nd.align[k];
+            out += '<td' + (a ? ' align="' + a + '"' : '') + '>' +
+              renderNodes(scanInline(row[k], refs)) + '</td>\n';
+          }
+          out += '</tr>\n';
         }
-        out += '</tr>\n';
+        out += '</tbody>';
       }
-      out += '</tbody></table>\n';
+      out += '</table>\n';
     }
   }
   return out;
