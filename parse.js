@@ -2155,7 +2155,7 @@ function parseInlineLink(s, p, n) {
     q2 = skipInlineWS(s, end, n);
     if (q2 === -1) return null;
   }
-  if (s[q2] !== ')') return null;
+  if (s[q2] !== ')') return { failedAfterDest: true };
   return { dest, title, end: q2 + 1 };
 }
 
@@ -2251,6 +2251,10 @@ function formLink(opener, root, dest, title) {
 // one, ']' subtracts one; backslash escapes and code spans are skipped.
 // The balance must stay >= 0 and end at 0 — the closer must be the
 // opener's matching ']'. (cm-520.)
+// Returns 0 if the link text [start, end) has balanced brackets,
+// 1 if the brackets are unbalanced, 2 if it contains a code span
+// whose content has a backtick and which is not the last thing before
+// the closing ']' (the marked quirk that blocks the link, doc-16).
 function linkTextBalanced(s, start, end) {
   let depth = 0, i = start;
   while (i < end) {
@@ -2270,17 +2274,28 @@ function linkTextBalanced(s, start, end) {
         } else k++;
       }
       if (found === -1) { i = j; continue; }
+      // A code span whose content contains a backtick, when it is not
+      // the last thing before the closing ']' (i.e. something follows
+      // it in the link text), prevents the link from forming (marked
+      // quirk, doc-16: "[x `` a ` b `` y](...)" is not a link, but
+      // "[x `` a ` b ``](...)" is). A code span with no inner backtick
+      // never blocks, and neither does one ending exactly at ']'.
+      if (found + runLen < end) {
+        let hasInner = false;
+        for (let q = j; q < found; q++) if (s[q] === '`') { hasInner = true; break; }
+        if (hasInner) return 2;
+      }
       i = found + runLen;
       continue;
     }
     if (c === '[') depth++;
     else if (c === ']') {
       depth--;
-      if (depth < 0) return false;
+      if (depth < 0) return 1;
     }
     i++;
   }
-  return depth === 0;
+  return depth === 0 ? 0 : 1;
 }
 
 // Try to form a link whose opener is `opener` ('[' or '![' entry) and
@@ -2299,10 +2314,18 @@ function tryLink(opener, closerPos, s, n, refs, root) {
   const last = root.lastChild;
   const p = closerPos + 1;
   let dest = null, title = null, end = -1;
+  // Did the inline-link attempt parse a destination (and optional
+  // title) but then find junk instead of ")"? If so, and no link forms
+  // at all, emphasis inside the link text is suppressed (marked quirk,
+  // doc-16: "[x _y_](dest junk)" leaves "_y_" literal; but if a
+  // shortcut reference then forms a link, the emphasis still forms).
+  let junkAfterDest = false;
   // 1. Inline link.
   if (s[p] === '(') {
     const r = parseInlineLink(s, p, n);
-    if (r) {
+    if (r && r.failedAfterDest) {
+      junkAfterDest = true;
+    } else if (r) {
       dest = unescapeBackslashes(r.dest);
       title = r.title === null ? null : unescapeBackslashes(r.title);
       end = r.end;
@@ -2350,7 +2373,18 @@ function tryLink(opener, closerPos, s, n, refs, root) {
       if (ref) { dest = ref.dest; title = ref.title; end = p; }
     }
   }
-  if (end === -1) return null;
+  if (end === -1) {
+    // No link formed. If the inline attempt failed with junk after a
+    // valid destination, suppress emphasis delimiters in the link text
+    // (they render as literal "*" / "_" / "~").
+    if (junkAfterDest) {
+      for (let c = first; c; c = c.next) {
+        if (c.t === 'delim' && c.delim && (c.ch === '*' || c.ch === '_' || c.ch === '~')) c.delim.removed = true;
+        if (c === last) break;
+      }
+    }
+    return null;
+  }
   formLink(opener, root, dest, title);
   return end;
 }
@@ -2460,10 +2494,36 @@ function parseInline(text, refs, out) {
         addText(i, j);
         i = j;
       } else {
-        const node = inode('code');
-        node.s = text; node.a = j; node.b = found;
-        iAppend(root, node);
-        i = found + runLen;
+        // A code span that opens inside a link text and would cross the
+        // link's closing "]" AND span a newline does not form in
+        // marked (doc-09, doc-16): the link forms instead. A same-line
+        // span crossing "]" still forms (cm-342, cm-525).
+        let crossesLink = false;
+        if (text.slice(j, found).indexOf('\n') !== -1) {
+          for (let d = delims.length - 1; d >= 0; d--) {
+            const od = delims[d];
+            if (od.removed || !od.active) continue;
+            if (od.ch === '[' || od.ch === '![') {
+              const tstart = od.pos + (od.ch === '![' ? 2 : 1);
+              for (let q = j; q < found; q++) {
+                if (text[q] === ']' && text[q + 1] === '(' && linkTextBalanced(text, tstart, q) === 0) {
+                  crossesLink = true;
+                  break;
+                }
+              }
+              break;
+            }
+          }
+        }
+        if (crossesLink) {
+          addText(i, j);
+          i = j;
+        } else {
+          const node = inode('code');
+          node.s = text; node.a = j; node.b = found;
+          iAppend(root, node);
+          i = found + runLen;
+        }
       }
       continue;
     }
@@ -2550,8 +2610,17 @@ function parseInline(text, refs, out) {
       // opener stays active for its real matching ']' (cm-520:
       // "![[[foo](uri1)](uri2)](uri3)" — the second ']' is not the
       // image's matching ']', the third is). Do NOT deactivate here.
+      // Code-span quirk (bal === 2): the link does not form AND
+      // emphasis inside the link text is suppressed (doc-16).
       const textStart = opener.pos + (opener.ch === '![' ? 2 : 1);
-      if (!linkTextBalanced(text, textStart, i)) {
+      const bal = linkTextBalanced(text, textStart, i);
+      if (bal !== 0) {
+        if (bal === 2) {
+          for (let c = opener.node.next; c; c = c.next) {
+            if (c.t === 'delim' && c.delim && (c.ch === '*' || c.ch === '_' || c.ch === '~')) c.delim.removed = true;
+            if (c === root.lastChild) break;
+          }
+        }
         addText(i, i + 1);
         i++;
         continue;
