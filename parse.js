@@ -2006,7 +2006,8 @@ function parseList(lines, i, refs) {
       if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
       const parsed = parseBlocks(innerLines, refs, 'list');
       if (lastBlockIsPara(parsed) && !isHr(l2S) && atxLevel(l2S) === 0 &&
-          fenceStart(l2S) === null && htmlBlockType(l2S) < 1 && l2M === null) {
+          fenceStart(l2S) === null && htmlBlockType(l2S) < 1 && l2M === null &&
+          !/^[ \t]*>/.test(l2S)) {
         itemLines.push({ s: l2.s, nl: l2.nl, blank: false });
         fence = updateFence(fence, l2.s);
         j++;
