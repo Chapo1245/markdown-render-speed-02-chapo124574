@@ -895,21 +895,36 @@ function parseInline(s, refs) {
   // a closer-only (Q=true). Strong forms iff P == Q (XNOR).
   // P: the most recent '*' em closer formed inside (openPos, closePos)
   //    has canOpen set (its '*' is followed by a letter).
-  function innerEmCanOpen(openPos, closePos) {
+  // Round 4 (doc-11): a formed '**' strong counts as P too — in
+  // `**removes example *input **parse**parse* release**` the inner
+  // strong's closing '**' can open (followed by a letter), so the lone
+  // '*' closer never pairs with the '**' opener and the '**' closer
+  // pairs with it instead (outer strong, inner '*'s literal).
+  function innerCloser(openPos, closePos) {
     for (let k = formedEm.length - 1; k >= 0; k--) {
       const e = formedEm[k];
-      if (e.pos <= openPos) return false;
+      if (e.pos <= openPos) return null;
       if (e.pos >= closePos) continue;
-      if (e.char === '*' && e.len === 1) return e.canOpen;
+      if (e.char === '*' && (e.len === 1 || e.use === 2)) return e;
     }
-    return false;
+    return null;
+  }
+  function innerEmCanOpen(openPos, closePos) {
+    const e = innerCloser(openPos, closePos);
+    return e ? e.canOpen : false;
   }
   // Q: the first '*' delimiter still pending inside (openPos, closePos)
   //    (the lone '*' after the inner em). Null when there is no lone '*'.
+  // Round 4 (doc-11): it must be the lone '*' AFTER the inner em/strong
+  // closer — a pending '*' before the inner node (e.g. the opener-only
+  // '*' before `**parse**`) is not the lone star the '**' closer sees;
+  // the closer-only '*' after it is (Q=true, so the strong forms).
   function loneStar(openPos, closePos) {
+    const ic = innerCloser(openPos, closePos);
+    const after = ic ? ic.pos : openPos;
     for (let k = 0; k < delims.length; k++) {
       const d = delims[k];
-      if (d.char !== '*' || d.pos <= openPos || d.pos >= closePos) continue;
+      if (d.char !== '*' || d.pos <= after || d.pos >= closePos) continue;
       return d;
     }
     return null;
