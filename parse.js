@@ -883,6 +883,25 @@ function parseInline(s, refs) {
     return null;
   }
 
+  // The formed '**' strong inside (openPos, closePos) whose closing
+  // '**' can open (is followed by a letter) AND whose opening '**' is
+  // detached (preceded by whitespace), if any. A single-'*' outer em
+  // never forms around such a strong (v1/v4: `*a **b**c*`); when the
+  // strong is attached to the preceding text (`*foo**bar**baz*`,
+  // cm-411) the outer em DOES form.
+  function innerStrongCanOpen(openPos, closePos) {
+    for (let k = formedEm.length - 1; k >= 0; k--) {
+      const e = formedEm[k];
+      if (e.pos <= openPos) return false;
+      if (e.pos >= closePos) continue;
+      if (e.char === '*' && e.use === 2) {
+        const detached = e.openPos > 0 && (s[e.openPos - 1] === ' ' || s[e.openPos - 1] === '\t' || s[e.openPos - 1] === '\n');
+        return e.canOpen && detached;
+      }
+    }
+    return false;
+  }
+
   function processEmphasis(closerIdx) {
     let closer = delims[closerIdx];
     if (!closer) return;
@@ -917,6 +936,14 @@ function parseInline(s, refs) {
           const ls = loneStar(d.pos, closer.pos);
           if (ls && !(ls.canClose && !ls.canOpen)) continue;
         }
+        // Marked '*' rule, em side: a single '*' opener never pairs to
+        // an em when a '**' strong already formed inside the span whose
+        // closing '**' can open (is followed by a letter) and whose
+        // opening '**' is detached (preceded by whitespace); the outer
+        // em stays literal (v1 `*a **b**c*`, v5 `*a **b**c**`, doc-07).
+        // When the strong is attached (`*foo**bar**baz*`, cm-411) the
+        // outer em DOES form.
+        if (closer.char === '*' && d.len === 1 && innerStrongCanOpen(d.pos, closer.pos)) continue;
         openerIdx = k; break;
       }
       if (openerIdx < 0) break;
@@ -938,7 +965,9 @@ function parseInline(s, refs) {
       // Record the closer for the marked '*' rule (innerEmCanOpen).
       // len is the closer's run length before this pairing consumed
       // `use` of it, so only single-'*' runs count as inner em closers.
-      formedEm.push({ pos: closer.pos, char: closer.char, len: closer.len + use, canOpen: closer.canOpen });
+      // openPos is the opener's source position (for the detached
+      // check in innerStrongCanOpen).
+      formedEm.push({ pos: closer.pos, openPos: opener.pos, char: closer.char, len: closer.len + use, use, canOpen: closer.canOpen });
       const mid = [];
       if (opener.node.s !== '') mid.push(opener.node);
       mid.push(emph);
