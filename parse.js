@@ -1286,7 +1286,11 @@ function parseInline(s, refs) {
         } else {
           const tagText = s.slice(i, a.end);
           if (/^<\/a(?:[\s>]|$)/i.test(tagText)) inLinkLeak = false;
-          else if (/^<a(?:[\s/>]|$)/i.test(tagText)) inLinkLeak = true;
+          // An <a> tag opens the link context only when the char after
+          // '<a' is whitespace or '>' (attributes / plain <a> / '<a />');
+          // a bare '<a/>' (slash right after the name) does NOT open it
+          // (t1/t4, doc-04).
+          else if (/^<a(?:[\s>]|$)/i.test(tagText)) inLinkLeak = true;
           appendNode(N('html', tagText));
         }
         i = a.end;
