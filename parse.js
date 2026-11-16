@@ -2528,7 +2528,7 @@ function parseInline(text, refs, out) {
     const node = inode('delim');
     node.ch = ch; node.len = len;
     iAppend(root, node);
-    const entry = { node, ch, canOpen, canClose, active: true, removed: false, scope: null, pos: i };
+    const entry = { node, ch, canOpen, canClose, active: true, removed: false, scope: null, pos: i, tainted: false };
     node.delim = entry;
     delims.push(entry);
     return entry;
@@ -2998,52 +2998,78 @@ function processEmphasis(delims) {
     // trapped inside an emphasis/link node the closer is not in cannot
     // match it, e.g. cm-470: the * before "baz" sits inside the strong
     // and must be skipped so the final * matches the opening *).
-    let oi = ci - 1;
-    let found = -1, use = 1;
     const bot = bottomFor(closer.scope, closer.ch);
     const blk = blockerFor(closer.scope, closer.ch);
     let blockedSkip = false;
-    while (oi > bot) {
-      const opener = delims[oi];
-      if (!opener.removed && opener.ch === closer.ch && opener.canOpen && opener.scope === closer.scope) {
-        const u = (opener.node.len >= 2 && closer.node.len >= 2) ? 2 : 1;
-        // Blocker: the next closer after an inner emphasis whose opener
-        // can only open and whose closer can both open and close may
-        // not match an opener at or before the inner opener when the
-        // match is "incompatible": the opener's length differs from the
-        // inner use and the closer does not over-supply delimiters, or
-        // the use differs from the inner use and the closer would only
-        // partly consume the opener (doc-11: a "*" must not steal one
-        // delimiter from the initial "**"; doc-30: a "***" closer that
-        // fully supplies the strong is allowed). (Not applied to the
-        // same closer re-processing its leftover delimiters.)
-        if (blk && ci !== blk.ci && oi <= blk.openerIdx &&
-            ((opener.node.len !== blk.use && closer.node.len <= opener.node.len) ||
-             (u !== blk.use && closer.node.len < opener.node.len))) {
-          blockedSkip = true;
-          oi--;
-          continue;
+    // Scan down from startOi for the nearest opener of the same char
+    // and scope that passes the blocker, odd-match and sibling checks
+    // with use >= minUse. A blocker-blocked opener is marked tainted
+    // (it was skipped for an earlier closer) and sets blockedSkip.
+    function scanFrom(startOi, minUse) {
+      let oi = startOi;
+      while (oi > bot) {
+        const opener = delims[oi];
+        if (!opener.removed && opener.ch === closer.ch && opener.canOpen && opener.scope === closer.scope) {
+          const u = (opener.node.len >= 2 && closer.node.len >= 2) ? 2 : 1;
+          // Blocker: a closer after an inner emphasis whose opener
+          // can only open and whose closer can both open and close may
+          // not match an opener at or before the inner opener when the
+          // match is "incompatible": the opener's length differs from the
+          // inner use and the closer does not over-supply delimiters, or
+          // the use differs from the inner use and the closer would only
+          // partly consume the opener (doc-11: a "*" must not steal one
+          // delimiter from the initial "**"; doc-30: a "***" closer that
+          // fully supplies the strong is allowed). (Not applied to the
+          // same closer re-processing its leftover delimiters.)
+          if (blk && ci !== blk.ci && oi <= blk.openerIdx &&
+              ((opener.node.len !== blk.use && closer.node.len <= opener.node.len) ||
+               (u !== blk.use && closer.node.len < opener.node.len))) {
+            opener.tainted = true;
+            blockedSkip = true;
+            oi--;
+            continue;
+          }
+          if (((opener.canOpen && opener.canClose) || (closer.canOpen && closer.canClose)) &&
+              (opener.node.len + closer.node.len) % 3 === 0 &&
+              (opener.node.len % 3 !== 0 || closer.node.len % 3 !== 0)) {
+            oi--;
+            continue;
+          }
+          // Can the opener and closer be joined? Walk up from the closer
+          // to a node whose parent is the opener's parent.
+          let S = closer.node;
+          while (S && S.parent !== opener.node.parent) S = S.parent;
+          if (!S) { oi--; continue; }
+          if (u < minUse) { oi--; continue; }
+          return { oi, u };
         }
-        if (((opener.canOpen && opener.canClose) || (closer.canOpen && closer.canClose)) &&
-            (opener.node.len + closer.node.len) % 3 === 0 &&
-            (opener.node.len % 3 !== 0 || closer.node.len % 3 !== 0)) {
-          oi--;
-          continue;
-        }
-        // Can the opener and closer be joined? Walk up from the closer
-        // to a node whose parent is the opener's parent.
-        let S = closer.node;
-        while (S && S.parent !== opener.node.parent) S = S.parent;
-        if (!S) { oi--; continue; }
-        found = oi; use = u;
-        break;
+        oi--;
       }
-      oi--;
+      return null;
     }
-    // One-shot: a blocker set by an earlier emphasis applies to this
-    // closer only (a different closer than the one that set it).
-    if (blk && ci !== blk.ci) setBlocker(closer.scope, closer.ch, null);
+    // Nearest passing opener; a tainted one is skipped for a farther
+    // opener with a strictly larger use (doc-11: the final "**" must
+    // match the initial "**" for a strong, not the tainted "*" before
+    // "input"; but a tainted opener still matches when no larger use
+    // is available, e.g. "*a **b**c* d e* f*").
+    const first = scanFrom(ci - 1, 1);
+    let found = -1, use = 1;
+    if (first) {
+      found = first.oi; use = first.u;
+      if (delims[found].tainted && use === 1) {
+        const bigger = scanFrom(found - 1, 2);
+        if (bigger) { found = bigger.oi; use = bigger.u; }
+      }
+    }
     if (found === -1) {
+      // The blocker lives until it has blocked blk.use closers, or an
+      // emphasis forms at a different closer (below); it is NOT one-shot
+      // ("*a **b**c* d e* f*" — the third closer after the inner strong
+      // may match the initial "*", the second may not).
+      if (blockedSkip && blk) {
+        blk.blockedCount = (blk.blockedCount || 0) + 1;
+        if (blk.blockedCount >= blk.use) setBlocker(closer.scope, closer.ch, null);
+      }
       // A closer that can also open must not set the bottom: it may still
       // serve as an opener for a later closer (e.g. "foo*bar*" — the
       // first * is both opener and closer; setting the bottom here would
@@ -3069,10 +3095,14 @@ function processEmphasis(delims) {
       ci++;
       continue;
     }
+    // An emphasis formed at a different closer clears the old blocker
+    // ("*a **b**c*d*e*" — the em "d" frees the final "*" to match the
+    // opening "*").
+    if (blk && ci !== blk.ci) setBlocker(closer.scope, closer.ch, null);
     // Set the blocker when the inner opener can only open and the inner
     // closer can both open and close (see the blocker comment above).
     if (!opener.canClose && closer.canOpen) {
-      setBlocker(closer.scope, closer.ch, { openerIdx: found, use: use, ci: ci });
+      setBlocker(closer.scope, closer.ch, { openerIdx: found, use: use, ci: ci, blockedCount: 0 });
     }
     // If the closer is fully used, move on; otherwise try to match the
     // leftover closer again (it can pair with an earlier opener).
