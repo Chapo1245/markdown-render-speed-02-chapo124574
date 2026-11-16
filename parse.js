@@ -850,7 +850,6 @@ function scanInline(src, refs, noExt) {
   let buf = '';
   let i = 0;
   const n = src.length;
-  let inA = false;
   function flush() { if (buf) { nodes.push({ t: 'x', s: buf }); buf = ''; } }
   while (i < n) {
     const ch = src[i];
@@ -879,8 +878,8 @@ function scanInline(src, refs, noExt) {
       const tag = matchRawHtml(src, i);
       if (tag !== null) {
         flush(); nodes.push({ t: 'r', s: tag });
-        if (/^<a /i.test(tag)) inA = true;
-        else if (/^<\/a[\s>\/]/i.test(tag)) inA = false;
+        if (/^<a /i.test(tag)) inAState = true;
+        else if (/^<\/a[\s>\/]/i.test(tag)) inAState = false;
         i += tag.length; continue;
       }
       buf += '<'; i++; continue;
@@ -926,7 +925,7 @@ function scanInline(src, refs, noExt) {
       }
       buf += '\n'; i++; continue;
     }
-    if (!inA && !noExt) {
+    if (!inAState && !noExt) {
       if (ch === 'w' && src.startsWith('www.', i)) {
         if (i === 0 || !isAlnum(src[i - 1])) {
           const end = matchExtUrl(src, i, true);
@@ -1171,6 +1170,9 @@ function tryRefDef(lines, i, refs) {
     dest = resolveEscapes(cur.slice(0, k));
     cur = cur.slice(k);
   }
+  // A title must be separated from the destination by whitespace; content
+  // glued directly onto the destination invalidates the definition.
+  if (cur.length > 0 && cur[0] !== ' ' && cur[0] !== '\t') return 0;
   // Optional title.
   let title = null;
   // Skip whitespace on this line; if the line ends, the title may be on the
@@ -1183,7 +1185,7 @@ function tryRefDef(lines, i, refs) {
     const saveLi = li, saveCur = cur;
     li++;
     if (li < n && !isBlankLine(lines[li])) {
-      const nc = sliceCol(lines[li].s, Math.min(indentCols(lines[li].s), 3));
+      const nc = lines[li].s.replace(/^[ \t]+/, '');
       const t = parseTitle(nc);
       if (t !== null) {
         // After the title, the rest of the line must be blank.
@@ -1212,7 +1214,7 @@ function tryRefDef(lines, i, refs) {
   }
   // After the dest/title, the rest of the current line must be blank.
   if (!/^[ \t]*$/.test(cur)) return 0;
-  refs.set(key, { href: dest, title });
+  if (!refs.has(key)) refs.set(key, { href: dest, title });
   return li - i + 1;
 }
 // Parse a title ("...", '...', or (...)) at the start of s. Returns
@@ -1644,13 +1646,13 @@ function parseBlocks(lines, refs, ctx) {
           let k = i + 1;
           while (k < n && isBlankLine(lines[k])) k++;
           if (k < n && indentCols(lines[k].s) >= 4) {
-            for (let b = i; b < k; b++) codeLines.push(sliceCol(lines[b].s, 4));
+            for (let b = i; b < k; b++) codeLines.push(stripIndentKeepTabs(lines[b].s, 4));
             i = k;
             continue;
           }
           break;
         }
-        if (indentCols(l2.s) >= 4) { codeLines.push(sliceCol(l2.s, 4)); i++; }
+        if (indentCols(l2.s) >= 4) { codeLines.push(stripIndentKeepTabs(l2.s, 4)); i++; }
         else break;
       }
       while (codeLines.length > 0 && codeLines[codeLines.length - 1] === '') codeLines.pop();
@@ -1863,8 +1865,14 @@ function renderBlocks(nodes, refs) {
 }
 
 // The entry point: render markdown exactly like marked 18.1.3 (default opts).
+// Unclosed-<a> suppression state: once an unclosed <a ...> tag is seen,
+// extended autolinks (www/scheme/email) are suppressed for the rest of the
+// document until a </a> closes it. This persists across paragraphs/blocks.
+let inAState = false;
+
 function parse(md) {
   const refs = new Map();
+  inAState = false;
   const lines = splitLines(md.replace(/\r\n?/g, '\n'));
   const nodes = parseBlocks(lines, refs, 'top');
   return renderBlocks(nodes, refs);
