@@ -907,6 +907,7 @@ function processEmphasis(nodes, delims) {
   }
   let blocked = null;
   let blockUse = 0;
+  let blockBudget = 0;
   let cur = delims[0];
   while (cur) {
     if (!cur.c || cur.n === 0 || cur.suppressed) { cur = cur.dn; continue; }
@@ -927,15 +928,20 @@ function processEmphasis(nodes, delims) {
         }
         // Tainted opener: a can-both closer that formed emphasis taints
         // the nearest earlier opener. A closer may match the tainted
-        // opener only with a use strictly larger than the tainting
-        // match's use; otherwise it skips it (the taint persists for
-        // later closers) and may only match a farther opener with a
+        // opener only with a use strictly greater than the tainting
+        // match's use AND (a different original length than the opener,
+        // or an exhausted budget). Otherwise it is blocked (consuming one
+        // from the budget) and may only match a farther opener with a
         // strictly larger use than it would have had with the tainted one.
         if (cand === blocked) {
           const u = cur.ch === '~' ? cur.n : (cand.n >= 2 && cur.n >= 2 ? 2 : 1);
-          if (u > blockUse) {
-            blocked = null; blockUse = 0;
+          if (u > blockUse && (cur.orig !== cand.orig || blockBudget === 0)) {
+            blocked = null; blockUse = 0; blockBudget = 0;
             opener = cand; break;
+          }
+          if (blockBudget > 0) {
+            blockBudget--;
+            if (blockBudget === 0) { blocked = null; blockUse = 0; }
           }
           taintedUse = u;
           cand = cand.dp; continue;
@@ -964,7 +970,7 @@ function processEmphasis(nodes, delims) {
     for (let d = opener.dn; d && d !== cur; d = d.dn) d.enclosed = true;
     // Emphasis formed at a different opener clears a pending blocker
     // (set by an earlier match).
-    if (blocked && opener !== blocked) { blocked = null; blockUse = 0; }
+    if (blocked && opener !== blocked) { blocked = null; blockUse = 0; blockBudget = 0; }
     // Set a blocker when a can-both closer matches a canOpen-only opener
     // and the nearest earlier opener has a different original length.
     if (cur.o && cur.c && opener.o && !opener.c) {
@@ -976,19 +982,44 @@ function processEmphasis(nodes, delims) {
       if (outer && outer.orig !== opener.orig) {
         blocked = outer;
         blockUse = use;
+        blockBudget = use;
       }
     }
     const inner = nodes.slice(oi + 1, ci);
-    const eNode = { t: 'e', tag, ch: inner };
+    const eNode = { t: 'e', tag, ch: inner, use, openableCloser: cur.o };
     opener.n -= use;
     cur.n -= use;
     const seg = [];
     if (opener.n > 0) seg.push(opener);
     seg.push(eNode);
-    if (cur.n > 0) seg.push(cur);
+    if (cur.n > 0) {
+      // Leftover closer goes INSIDE a strong when the strong contains an
+      // inner em/del with use 1 whose closer was openable: the leftover
+      // becomes literal text at the end of the strong's content.
+      let inside = false;
+      if (tag === 'strong') {
+        const stack = [...inner];
+        while (stack.length > 0) {
+          const nd = stack.pop();
+          if (nd.t === 'e' && nd.use === 1 && nd.openableCloser) { inside = true; break; }
+          if (nd.t === 'e' && nd.ch) stack.push(...nd.ch);
+        }
+      }
+      if (inside) {
+        eNode.ch.push(cur);
+      } else {
+        seg.push(cur);
+      }
+    }
     nodes.splice(oi, ci - oi + 1, ...seg);
     if (opener.n === 0) unlinkDelim(opener);
     if (cur.n === 0) {
+      const nxt = cur.dn;
+      unlinkDelim(cur);
+      cur = nxt;
+    } else if (seg.indexOf(cur) === -1) {
+      // Leftover closer placed inside the strong: it is literal text now,
+      // not a delimiter to re-process.
       const nxt = cur.dn;
       unlinkDelim(cur);
       cur = nxt;
