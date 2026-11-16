@@ -1588,6 +1588,28 @@ function listContentIndent(line, markerLen) {
 }
 
 // Collect a list starting at lines[i]. Returns {node, next}.
+// Scan collected lines for an unclosed fenced code block. Returns
+// {ch, len} if a fence is open, else null. Used while collecting list-item
+// lines: fence content ignores container indentation, so a line with indent
+// below the item's content indent is still fence content, not an item end.
+function openFence(lines) {
+  let fence = null;
+  for (const l of lines) {
+    if (l.blank) continue;
+    const ind = indentCols(l.s);
+    const s = sliceCol(l.s, Math.min(ind, 3));
+    if (fence === null) {
+      const fs = fenceStart(s);
+      if (fs !== null) fence = { ch: fs.ch, len: fs.len };
+    } else if (s.length >= fence.len && s[0] === fence.ch) {
+      let k = 0;
+      while (k < s.length && s[k] === fence.ch) k++;
+      if (k >= fence.len && /^[ \t]*$/.test(s.slice(k))) fence = null;
+    }
+  }
+  return fence;
+}
+
 function parseList(lines, i, refs) {
   const n = lines.length;
   const firstInd = indentCols(lines[i].s);
@@ -1673,6 +1695,13 @@ function parseList(lines, i, refs) {
           l2Ind < contentInd && l2Ind <= firstInd + 3) break;
       if (l2Ind >= contentInd) {
         itemLines.push({ s: sliceCol(l2.s, contentInd), nl: l2.nl, blank: false });
+        j++;
+        continue;
+      }
+      // Fence content ignores container indentation: while a fenced code
+      // block in this item is unclosed, every line is fence content.
+      if (openFence(itemLines) !== null) {
+        itemLines.push({ s: l2.s, nl: l2.nl, blank: false });
         j++;
         continue;
       }
@@ -1908,11 +1937,15 @@ function parseBlocks(lines, refs, ctx) {
         if (head.length === align.length) {
           const rows = [];
           i += 2;
-          while (i < n && !isBlankLine(lines[i])) {
+          while (i < n) {
+            // A whitespace-only line of spaces + a single tab is a table
+            // row (empty cells); any other blank line ends the table.
+            const isTabRow = /^ *\t$/.test(lines[i].s);
+            if (!isTabRow && isBlankLine(lines[i])) break;
             // A row ends the table if the line starts a block that would
             // interrupt a paragraph (blockquote, heading, fence, list, hr,
             // HTML) or is indented code (indent >= 4). Plain text is a row.
-            if (interruptsPara(lines, i, ctx) || indentCols(lines[i].s) >= 4) break;
+            if (!isTabRow && (interruptsPara(lines, i, ctx) || indentCols(lines[i].s) >= 4)) break;
             const rInd = indentCols(lines[i].s);
             const rS = sliceCol(lines[i].s, Math.min(rInd, 3));
             const cells = splitTableRow(rS).map(c => c.trim());
