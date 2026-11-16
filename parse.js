@@ -1073,10 +1073,10 @@ function scanInline(src, refs, noExt) {
         let end = matchEmail(src, i);
         if (end === -1) {
           // A trailing '_' in the domain may be an emphasis closer rather
-          // than part of the address. If an unmatched '_' opener exists,
-          // retry with the domain truncated before that trailing '_'.
-          const hasOpen = delims.some(d => d.ch === '_' && d.o && d.n > 0);
-          if (hasOpen) end = matchEmailTrunc(src, i);
+          // than part of the address. Only when a truncated address exists
+          // do we check for an unmatched '_' opener.
+          const trunc = matchEmailTrunc(src, i);
+          if (trunc !== -1 && delims.some(d => d.ch === '_' && d.o && d.n > 0)) end = trunc;
         }
         if (end !== -1) {
           const em = src.slice(i, end);
@@ -1676,24 +1676,32 @@ function listContentIndent(line, markerLen) {
 }
 
 // Collect a list starting at lines[i]. Returns {node, next}.
-// Scan collected lines for an unclosed fenced code block. Returns
-// {ch, len} if a fence is open, else null. Used while collecting list-item
-// lines: fence content ignores container indentation, so a line with indent
-// below the item's content indent is still fence content, not an item end.
-function openFence(lines) {
-  let fence = null;
-  for (const l of lines) {
-    if (l.blank) continue;
-    const ind = indentCols(l.s);
-    const s = sliceCol(l.s, Math.min(ind, 3));
-    if (fence === null) {
-      const fs = fenceStart(s);
-      if (fs !== null) fence = { ch: fs.ch, len: fs.len };
-    } else if (s.length >= fence.len && s[0] === fence.ch) {
-      let k = 0;
-      while (k < s.length && s[k] === fence.ch) k++;
-      if (k >= fence.len && /^[ \t]*$/.test(s.slice(k))) fence = null;
-    }
+// Incremental version of openFence: update the fence state ({ch,len} or
+// null) for one newly collected item line s. Blank lines do not change it.
+function updateFence(fence, s) {
+  if (!s || s.length === 0) return fence;
+  // Fast path: a fence start/close must begin (after <=3 spaces) with
+  // a backtick or tilde. Anything else cannot change fence state.
+  let k = 0;
+  while (k < s.length && s[k] === ' ' && k < 3) k++;
+  const c = s[k];
+  if (fence === null) {
+    if (c !== '`' && c !== '~') return null;
+  } else if (c !== fence.ch) {
+    return fence;
+  }
+  if (/^[ \t]*$/.test(s)) return fence;
+  const ind = indentCols(s);
+  const t = sliceCol(s, Math.min(ind, 3));
+  if (fence === null) {
+    const fs = fenceStart(t);
+    if (fs !== null) return { ch: fs.ch, len: fs.len };
+    return null;
+  }
+  if (t.length >= fence.len && t[0] === fence.ch) {
+    let m = 0;
+    while (m < t.length && t[m] === fence.ch) m++;
+    if (m >= fence.len && /^[ \t]*$/.test(t.slice(m))) return null;
   }
   return fence;
 }
@@ -1729,7 +1737,9 @@ function parseList(lines, i, refs) {
     const firstContent = s.slice(ci.idx);
     // An item whose marker line has no content (only whitespace after the
     // marker) starts empty; trailing spaces are not content.
-    itemLines.push({ s: /^[ \t]*$/.test(firstContent) ? '' : ' '.repeat(firstLead) + firstContent, nl: ln.nl, blank: false });
+    const firstS = /^[ \t]*$/.test(firstContent) ? '' : ' '.repeat(firstLead) + firstContent;
+    itemLines.push({ s: firstS, nl: ln.nl, blank: false });
+    let fence = updateFence(null, firstS);
     j++;
     let itemBlank = false;
     while (j < n) {
@@ -1782,14 +1792,17 @@ function parseList(lines, i, refs) {
           (ordered ? l2M.delim === firstM.delim : l2M.bullet === firstM.bullet) &&
           l2Ind < contentInd && l2Ind <= firstInd + 3) break;
       if (l2Ind >= contentInd) {
-        itemLines.push({ s: sliceCol(l2.s, contentInd), nl: l2.nl, blank: false });
+        const stripped = sliceCol(l2.s, contentInd);
+        itemLines.push({ s: stripped, nl: l2.nl, blank: false });
+        fence = updateFence(fence, stripped);
         j++;
         continue;
       }
       // Fence content ignores container indentation: while a fenced code
       // block in this item is unclosed, every line is fence content.
-      if (openFence(itemLines) !== null) {
+      if (fence !== null) {
         itemLines.push({ s: l2.s, nl: l2.nl, blank: false });
+        fence = updateFence(fence, l2.s);
         j++;
         continue;
       }
@@ -1799,6 +1812,7 @@ function parseList(lines, i, refs) {
       if (lastBlockIsPara(parsed) && !isHr(l2S) && atxLevel(l2S) === 0 &&
           fenceStart(l2S) === null && htmlBlockType(l2S) < 1 && l2M === null) {
         itemLines.push({ s: l2.s, nl: l2.nl, blank: false });
+        fence = updateFence(fence, l2.s);
         j++;
         continue;
       }
