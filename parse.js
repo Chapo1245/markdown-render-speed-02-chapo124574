@@ -1018,10 +1018,11 @@ function parseInline(s, refs) {
     // A GFM autolink inside the text is different: it dissolves to
     // plain text when an outer link forms around it (doc-16), at any
     // depth (doc-34: inside a <del>), but never inside a nested
-    // real link.
+    // real link. An angle autolink <...> is different again: it stays
+    // a nested link and does not block the outer link (k4, doc-04).
     if (!isImg) {
       for (const node of collected) {
-        if (node.t === 'link' && !node.auto && node.parent === opener.node.parent) {
+        if (node.t === 'link' && !node.auto && !node.angleAuto && node.parent === opener.node.parent) {
           opener.active = false; return 0;
         }
       }
@@ -1207,6 +1208,10 @@ function parseInline(s, refs) {
         if (a.kind === 'link') {
           const node = N('link', a.text);
           node.dest = a.dest; node.title = '';
+          // Angle autolink <...>: unlike a GFM autolink it does NOT
+          // dissolve inside an outer link — marked keeps it as a nested
+          // link (k4) — but it must not block the outer link either.
+          node.angleAuto = true;
           node.ch = [N('text', a.text)];
           appendNode(node);
         } else {
