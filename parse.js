@@ -687,6 +687,16 @@ class BP {
         }
       }
       cSkip(c, tip.fenceIndent);
+      // A tab partly consumed by container matching keeps a remainder
+      // measured from the raw column, but marked measures it from the
+      // column relative to the innermost quote marker (doc-30: a tab
+      // right after ">" at col 7 leaves a raw remainder of 3, marked
+      // wants 2). Recompute from the quote-relative column when it
+      // is smaller.
+      if (save.tab > 0 && this.markerSpace && c.tab > 0) {
+        const recomputed = 4 - ((save.col - this.quoteCol) % 4);
+        if (recomputed < c.tab) c.tab = recomputed;
+      }
       // If the fence-indent strip landed inside a tab, the whole tab
       // is dropped, not just the stripped columns (doc-17: a
       // 3-column strip of a 4-wide tab leaves nothing, not 1 space;
