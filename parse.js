@@ -414,7 +414,7 @@ function scanExtPath(s, i) {
   let j = i;
   while (j < n) {
     const c = s[j];
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '<' || c === '>' || c < ' ') break;
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '<' || c === '>' || c === ']' || c < ' ') break;
     // stop before an entity-like &name; (e.g. &hl;)
     if (c === '&') {
       let k = j + 1;
@@ -423,19 +423,19 @@ function scanExtPath(s, i) {
     }
     j++;
   }
-  // trim trailing punctuation ? ! . , : ; * _ ~ ' "
-  while (j > i) {
-    const c = s[j - 1];
-    if ('?!.,:;*_~\'"'.indexOf(c) >= 0) { j--; continue; }
+  // Trim trailing punctuation and unbalanced ')' until stable: dropping
+  // a ')' can expose a '.' (and vice versa), e.g. `...nova).)` must
+  // lose the ')', then the '.', then the unbalanced ')' (doc-10/16).
+  while (true) {
+    while (j > i && '?!.,:;*_~\'"'.indexOf(s[j - 1]) >= 0) j--;
+    let open = 0, close = 0;
+    for (let k = i; k < j; k++) {
+      if (s[k] === '(') open++;
+      else if (s[k] === ')') close++;
+    }
+    if (j > i && s[j - 1] === ')' && close > open) { j--; continue; }
     break;
   }
-  // balanced parens: drop trailing ')' while there are more ')' than '('
-  let open = 0, close = 0;
-  for (let k = i; k < j; k++) {
-    if (s[k] === '(') open++;
-    else if (s[k] === ')') close++;
-  }
-  while (j > i && s[j - 1] === ')' && close > open) { j--; close--; }
   return j;
 }
 // Try a www. autolink at s[i] (s[i..] starts with 'www.'). prevOk: preceding
@@ -788,9 +788,20 @@ function parseInline(s, refs) {
     // normally enforced by deactivation, but '[' openers inside an
     // '![' are left active (see below) so they are tried here and
     // must fail when their text already holds a link (cm-520).
+    // A GFM autolink inside the text is different: it dissolves to
+    // plain text when an outer link forms around it (doc-16).
     if (!isImg) {
       for (const node of collected) {
-        if (node.t === 'link' && node.parent === opener.node.parent) { opener.active = false; return 0; }
+        if (node.t === 'link' && node.parent === opener.node.parent) {
+          if (node.auto) {
+            node.t = 'text';
+            node.s = plainTextNode(node);
+            node.ch = [];
+            delete node.dest; delete node.title; delete node.auto;
+          } else {
+            opener.active = false; return 0;
+          }
+        }
       }
     }
     for (const node of collected) removeNode(node);
@@ -1002,6 +1013,7 @@ function parseInline(s, refs) {
       if (w) {
         const node = N('link', w.text);
         node.dest = 'http://' + w.text;
+        node.auto = true; // GFM autolink: dissolves to text inside a link
         node.ch = [N('text', w.text)];
         appendNode(node);
         i = w.end;
@@ -1017,6 +1029,7 @@ function parseInline(s, refs) {
         if (last.s === '') removeNode(last);
         const node = N('link', sc.text);
         node.dest = sc.text;
+        node.auto = true; // GFM autolink: dissolves to text inside a link
         node.ch = [N('text', sc.text)];
         appendNode(node);
         i = sc.end;
@@ -1031,6 +1044,7 @@ function parseInline(s, refs) {
         if (last.s === '') removeNode(last);
         const node = N('link', sc.text);
         node.dest = sc.text;
+        node.auto = true; // GFM autolink: dissolves to text inside a link
         node.ch = [N('text', sc.text)];
         appendNode(node);
         i = sc.end;
@@ -1048,6 +1062,7 @@ function parseInline(s, refs) {
         if (em && em.end > i && cutTrailingText(s.slice(st, i))) {
           const node = N('link', em.text);
           node.dest = 'mailto:' + em.text;
+          node.auto = true; // GFM autolink: dissolves to text inside a link
           node.ch = [N('text', em.text)];
           appendNode(node);
           i = em.end;
