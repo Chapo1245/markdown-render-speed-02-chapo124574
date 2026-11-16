@@ -209,8 +209,10 @@ function stripIndentKeepTabs(s, col) {
     if (ch === ' ') { c++; i++; }
     else if (ch === '\t') {
       const next = c + (4 - (c % 4));
+      // A tab that the cut falls inside is removed entirely: no
+      // leftover spaces are left for the part past the cut.
       if (next <= col) { c = next; i++; }
-      else return ' '.repeat(next - col) + s.slice(i + 1);
+      else return s.slice(i + 1);
     } else break;
   }
   return s.slice(i);
