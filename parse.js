@@ -460,6 +460,21 @@ class BP {
     b.text += text;
   }
 
+  // Text of a paragraph line starting at the cursor. A leading tab
+  // expands to the next tab stop measured from the effective column
+  // (after the innermost ">" when a blockquote marker consumed a space
+  // on this line); at effective column 0 it stays literal (cm-040:
+  // "\tfoo" is "<p>\tfoo</p>"). This is the paragraph analogue of the
+  // fenced-code tab rule (doc-17/40: "  > \tindented" becomes
+  // "  indented").
+  paraText(c) {
+    if (c.tab === 0 && c.s[c.i] === '\t') {
+      const effCol = this.markerSpace ? c.col - this.quoteCol : c.col;
+      if (effCol > 0) return ' '.repeat(4 - (effCol % 4)) + c.s.slice(c.i + 1);
+    }
+    return cRest(c);
+  }
+
   line(L) {
     const c = curOf(L);
     this.markerSpace = false;
@@ -549,7 +564,12 @@ class BP {
         }
             if (tip.t === 'code' && tip.fenced) {
           // Blank lines are content of fenced code (fence indent stripped).
+          // If the strip landed inside a tab, the whole tab is dropped
+          // (doc-13: a lone tab under a 2-indent fence is an empty
+          // line, not 2 spaces).
+          const tab0 = c.tab;
           cSkip(c, tip.fenceIndent);
+          if (tab0 === 0 && c.tab > 0) { c.col += c.tab; c.tab = 0; c.i++; }
           this.addRaw(tip, cRest(c), L.eol);
           return;
         }
@@ -642,18 +662,22 @@ class BP {
       }
       c.i = save.i; c.col = save.col; c.tab = save.tab;
       cSkip(c, tip.fenceIndent);
-      // If any indent was stripped (container prefix and/or fence indent)
-      // and the content starts with a tab, the tab expands to spaces
-      // (doc-01: 13 spaces + tab becomes 3 spaces, to column 16). At
-      // column 0 with nothing stripped, a leading tab is kept literal
-      // (doc-01 toml block: "\tindented" stays "\t"). Inside a
-      // blockquote, the tab stop is measured relative to the ">"
-      // (doc-14: "\t      > \tindented", ">" at col 10, tab at col 12
-      // -> 2 spaces; doc-12: "    > \tindented", ">" at col 4, tab at
-      // col 6 -> 2 spaces; doc-02: ">   \tindented", ">" at col 0, tab
-      // at col 4 -> 4 spaces).
-      if (c.col > 0 && c.tab === 0 && c.s[c.i] === '\t') {
-        const effCol = this.markerSpace ? c.col - this.quoteCol : c.col;
+      // If the fence-indent strip landed inside a tab, the whole tab
+      // is dropped, not just the stripped columns (doc-17: a
+      // 3-column strip of a 4-wide tab leaves nothing, not 1 space;
+      // doc-13: a lone tab under a 2-indent fence is an empty line).
+      // Only when the tab was whole at the strip; a tab already
+      // partly consumed by container matching keeps its remainder.
+      if (save.tab === 0 && c.tab > 0) { c.col += c.tab; c.tab = 0; c.i++; }
+      // A tab right after the strip expands to the next tab stop
+      // measured from the column after container prefixes (save.col),
+      // NOT from the post-strip column: the fence indent is not part
+      // of the tab's column (doc-13: "  \tindented" under a 2-indent
+      // fence keeps the tab literal, because save.col is 0; doc-01: a
+      // tab after 13 container columns expands to 3 spaces, to
+      // column 16).
+      if (save.col > 0 && c.tab === 0 && c.s[c.i] === '\t') {
+        const effCol = this.markerSpace ? save.col - this.quoteCol : save.col;
         c.tab = 4 - (effCol % 4);
       }
       this.addRaw(tip, cRest(c), L.eol);
@@ -693,16 +717,28 @@ class BP {
       // "- foo\n-" starts a new empty item, it is not paragraph text).
       const b0 = this.scanBlockStart(c);
       if (!(b0 && b0.kind === 'list') && !this.isInterrupting(c)) {
-        // A lazy line loses its leading indentation (cm-238: "    - bar"
-        // becomes "- bar"; cm-312: "    - e" becomes "- e"). But a tab
-        // partially consumed by container matching (c.tab > 0) expands
-        // to spaces that are CONTENT, not indentation (doc-25: a lazy
+        // A lazy line indented by 4+ columns loses its leading
+        // whitespace (cm-238: "    - bar" becomes "- bar"; cm-312:
+        // "    - e" becomes "- e"); with less indent the remainder
+        // after the matched containers is kept as-is (doc-17:
+        // " | not | a | table |" keeps its 1 space). A tab partially
+        // consumed by container matching (c.tab > 0) expands to
+        // spaces that are CONTENT, not indentation (doc-25: a lazy
         // "\tfn main()" keeps one space from the tab's remainder).
+        // A lazy line starting with a whole tab expands it to the
+        // next tab stop from the effective column (doc-40:
+        // "    > \tindented" keeps 2 spaces).
         let text;
         if (c.tab > 0) {
           text = ' '.repeat(c.tab) + c.s.slice(c.i + 1).replace(/^[ \t]+/, '');
-        } else {
+        } else if (c.s[c.i] === '\t') {
+          const effCol = this.markerSpace ? c.col - this.quoteCol : c.col;
+          const n = effCol > 0 ? 4 - (effCol % 4) : 4;
+          text = ' '.repeat(n) + c.s.slice(c.i + 1).replace(/^[ \t]+/, '');
+        } else if (cSpaces(c) >= 4) {
           text = cRest(c).replace(/^[ \t]+/, '');
+        } else {
+          text = cRest(c);
         }
         if (isSetextLine(text)) text = '    ' + text;
         this.addPara(tip, text);
@@ -1183,7 +1219,7 @@ BP.prototype.addBlocks = function (c, L) {
       // an item starts an <ol start="505791">).
       if (!b || b.kind === 'indented' || (b.kind === 'html' && b.type7) ||
           (b.kind === 'list' && (b.empty || (b.ordered && b.start !== 1 && tip.parent.t !== 'item')))) {
-        this.addPara(tip, cRest(c));
+        this.addPara(tip, this.paraText(c));
         this.pendingBlank = false;
         return;
       }
@@ -1204,7 +1240,7 @@ BP.prototype.addBlocks = function (c, L) {
       const p = newNode('para', tip);
       this.childStarted(tip);
       this.stack.push(p);
-      this.addPara(p, cRest(c));
+      this.addPara(p, this.paraText(c));
       this.pendingBlank = false;
       return;
     }
@@ -1276,7 +1312,7 @@ BP.prototype.addBlocks = function (c, L) {
         const p = newNode('para', tip);
         this.childStarted(tip);
         this.stack.push(p);
-        this.addPara(p, cRest(c));
+        this.addPara(p, this.paraText(c));
         this.pendingBlank = false;
         return;
       }
