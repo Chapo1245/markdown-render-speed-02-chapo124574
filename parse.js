@@ -1101,12 +1101,31 @@ function scanInline(src, refs, noExt) {
       }
       if (res) {
         flush();
-        const kids = scanInline(src.slice(res.ts, res.te), refs, true);
+        const linkText = src.slice(res.ts, res.te);
+        // A backtick run inside this link's text can close a pending
+        // virtual code-span opener from an earlier link and suppress
+        // emphasis delimiters created after that earlier link.
+        let p = 0;
+        while (p < linkText.length) {
+          if (linkText[p] !== '`') { p++; continue; }
+          let q = p;
+          while (q < linkText.length && linkText[q] === '`') q++;
+          const runLen = q - p;
+          for (let v = virtuals.length - 1; v >= 0; v--) {
+            const V = virtuals[v].len;
+            if (V >= 2 && V % 2 === 0 && (runLen === V || runLen === 1) && delims.length > virtuals[v].delimIdx) {
+              for (let d = virtuals[v].delimIdx; d < delims.length; d++) delims[d].suppressed = true;
+              virtuals.splice(v, 1);
+            }
+          }
+          p = q;
+        }
+        const kids = scanInline(linkText, refs, true);
         if (res.isImage) nodes.push({ t: 'i', src: res.href, title: res.title, alt: altText(kids) });
         else nodes.push({ t: 'a', href: res.href, title: res.title, ch: kids });
         // An unclosed backtick run inside the link/image text is a
         // virtual code-span opener for the outer scope.
-        const vlen = unclosedBacktickRun(src.slice(res.ts, res.te));
+        const vlen = unclosedBacktickRun(linkText);
         if (vlen !== null && vlen >= 2 && vlen % 2 === 0) virtuals.push({ len: vlen, delimIdx: delims.length });
         i = res.end; continue;
       }
