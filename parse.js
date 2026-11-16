@@ -1911,14 +1911,22 @@ function parseBlocks(src) {
       b.literal = lit;
     } else if (b.t === 'html') {
       let lit = b.lines.map(function (l) { return l.s + (l.nl ? '\n' : ''); }).join('');
-      // Trailing-newline strip: type 6 strips unless the block runs to
-      // EOF; types 1-5/7 strip iff the next source line is blank.
+      // Trailing-newline strip (doc-24):
+      // - types 1-5 (raw blocks ending at a closing sequence: pre/script/
+      //   style/textarea, comment, PI, declaration, CDATA): strip ONLY
+      //   when the next source line is truly empty; a whitespace-only
+      //   separator keeps the newline (w1/y3/y5/t31/t41/t51).
+      // - type 6 (block tags): strip whenever the block does not run to EOF.
+      // - type 7 (single complete tag): strip iff the next line is blank.
       if (lit.endsWith('\n')) {
         if (b.htmlType === 6) {
           if (b.lastLine !== undefined && b.lastLine < lines.length - 1) lit = lit.slice(0, -1);
-        } else {
+        } else if (b.htmlType === 7) {
           const next = lines[b.lastLine + 1];
           if (next && next.s.trim() === '') lit = lit.slice(0, -1);
+        } else {
+          const next = lines[b.lastLine + 1];
+          if (next && next.s === '') lit = lit.slice(0, -1);
         }
       }
       b.literal = lit;
