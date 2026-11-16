@@ -420,6 +420,7 @@ class BP {
   line(L) {
     const c = curOf(L);
     this.markerSpace = false;
+    this.quoteCol = 0;
     // Whether the raw line (before any container marker is consumed)
     // is blank. Only a real blank line counts for list tightness.
     this.rawBlank = cIsBlank(c);
@@ -437,6 +438,7 @@ class BP {
         const si = c.i, scol = c.col, stab = c.tab;
         cSkip(c, 3);
         if (cPeek(c) === '>') {
+          this.quoteCol = c.col; // column of this ">" (innermost wins)
           cAdv(c);
           const nx = cPeek(c);
           if (nx === ' ' || nx === '\t') { cAdv1(c); this.markerSpace = true; }
@@ -591,16 +593,14 @@ class BP {
       // and the content starts with a tab, the tab expands to spaces
       // (doc-01: 13 spaces + tab becomes 3 spaces, to column 16). At
       // column 0 with nothing stripped, a leading tab is kept literal
-      // (doc-01 toml block: "\tindented" stays "\t"). When the tab
-      // immediately follows an INDENTED blockquote marker (the line
-      // starts with whitespace before ">"), the marker's trailing
-      // space does not count toward the tab stop (doc-14: "\t      >
-      // \tindented" expands the tab to 2 spaces, as if at column 10,
-      // the ">" column, not 12). A ">" at column 0 keeps the absolute
-      // column (doc-02's ">   \tindented" keeps 4 spaces).
+      // (doc-01 toml block: "\tindented" stays "\t"). Inside a
+      // blockquote, the tab stop is measured relative to the ">"
+      // (doc-14: "\t      > \tindented", ">" at col 10, tab at col 12
+      // -> 2 spaces; doc-12: "    > \tindented", ">" at col 4, tab at
+      // col 6 -> 2 spaces; doc-02: ">   \tindented", ">" at col 0, tab
+      // at col 4 -> 4 spaces).
       if (c.col > 0 && c.tab === 0 && c.s[c.i] === '\t') {
-        const indentedQuote = this.markerSpace && (c.s[0] === ' ' || c.s[0] === '\t');
-        const effCol = indentedQuote ? c.col - 2 : c.col;
+        const effCol = this.markerSpace ? c.col - this.quoteCol : c.col;
         c.tab = 4 - (effCol % 4);
       }
       this.addRaw(tip, cRest(c), L.eol);
