@@ -2306,9 +2306,11 @@ function parseBlocks(src) {
     // item. It only closes when the line starts a new block (q4) or is
     // blank (handled above). A code block inside a blockquote does NOT
     // get this: it closes when the '>' is missing (the quote is not lazy).
+    // And it only applies once the block already has content: an
+    // unindented FIRST line leaves an empty code block (s1/s3, doc-17/38).
     if ((tp.t === 'code' || tp.t === 'html' || tp.t === 'table') && ci !== open.length - 2) {
       const lazyInItem = tp.t === 'code' && tp.fenced && tp.parent && tp.parent.t === 'item' &&
-        open.indexOf(tp.parent) > ci && !startsNewBlock(cur, tp, false, false);
+        tp.lines.length > 0 && open.indexOf(tp.parent) > ci && !startsNewBlock(cur, tp, false, false);
       if (!lazyInItem) {
         closeBlocksBelow(ci);
         tp = tip();
