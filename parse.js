@@ -476,14 +476,14 @@ function trySchemeSlash(s, i) {
 }
 // Try a scheme:email autolink (s[i] == ':' and not '//'). Returns
 // {text, schemeStart, end} or null.
-function trySchemeEmail(s, i) {
+function trySchemeEmail(s, i, isEmCloser) {
   const n = s.length;
   let st = i - 1;
   while (st >= 0 && (isAlnum(s[st]) || s[st] === '+' || s[st] === '.' || s[st] === '-')) st--;
   st++;
   const scheme = s.slice(st, i);
   if (scheme.length < 2 || scheme.length > 32 || !isLetter(scheme[0])) return null;
-  const em = tryEmail(s, i + 1);
+  const em = tryEmail(s, i + 1, isEmCloser);
   if (!em) return null;
   let end = em.end;
   // optional single path segment /xxx (not containing '/')
@@ -497,9 +497,92 @@ function trySchemeEmail(s, i) {
   }
   return { text: s.slice(st, end), schemeStart: st, end: end };
 }
+// Email domain label: any mix of alphanumerics, '_' and '-', but the
+// label must end with an alphanumeric (a lone '_' or '-' is not a label;
+// labels may start with '_' or '-', e.g. `foo@bar._com` autolinks).
+const EMAIL_LABEL = /^[A-Za-z0-9_-]*[A-Za-z0-9]$/;
+function validEmailDomain(dom) {
+  if (!dom) return false;
+  const parts = dom.split('.');
+  if (parts.length < 2) return false;
+  for (const p of parts) if (!EMAIL_LABEL.test(p)) return false;
+  return true;
+}
+// Whether the ']' at closeIdx is a valid closer for a link whose text
+// starts at `from`: marked's bracket scan toggles "inside a code span"
+// on EVERY backtick run (whatever its length), so the ']' only counts
+// when the number of backtick runs in the text is even (an odd count
+// means the ']' sits inside a code span, e.g. `[a `` x ` y `` b]`)
+// — unless the ']' sits immediately after a backtick run (a code span
+// closing right before it, e.g. `[a `` x ` y ``]` still links).
+// Escaped backticks (`\``) do not count.
+function linkTextBracketOK(s, from, to) {
+  const first = s.indexOf('`', from);
+  if (first < 0 || first >= to) return true;
+  let runs = 0;
+  let i = from;
+  let lastRunEnd = -1;
+  while (i < to) {
+    const c = s[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      runs++;
+      while (i < to && s[i] === '`') i++;
+      lastRunEnd = i;
+      continue;
+    }
+    i++;
+  }
+  return runs % 2 === 0 || lastRunEnd === to;
+}
+// For a '[' opener at `openerPos` (text starts at openerPos+cut), find
+// the link-text region that marked's bracket scan leaves dead: the scan
+// finds no ']' with an even backtick-run count (no valid closer) and the
+// FIRST ']' has an odd count and is followed by '('. Returns
+// [textStart, bracketPos] or null. No emphasis forms inside such a region.
+function deadLinkRegion(s, openerPos, cut) {
+  const n = s.length;
+  let runs = 0, depth = 1, j = openerPos + cut;
+  let firstBracket = -1, firstValid = false, firstParen = false;
+  let afterBacktick = false; // the previous chars were a backtick run
+  while (j < n) {
+    const c = s[j];
+    if (c === '\\') { j += 2; afterBacktick = false; continue; }
+    if (c === '`') {
+      runs++;
+      while (j < n && s[j] === '`') j++;
+      afterBacktick = true;
+      continue;
+    }
+    if (c === '[' && runs % 2 === 0) { depth++; j++; afterBacktick = false; continue; }
+    if (c === ']') {
+      const valid = (runs % 2 === 0) || afterBacktick;
+      if (firstBracket < 0) {
+        firstBracket = j; firstValid = valid;
+        firstParen = (s[j + 1] === '(');
+      }
+      if (valid) {
+        depth--;
+        if (depth === 0) return null; // a valid closer exists
+      }
+      j++;
+      afterBacktick = false;
+      continue;
+    }
+    j++;
+    afterBacktick = false;
+  }
+  if (firstBracket < 0) return null;
+  if (firstValid) return null;
+  if (!firstParen) return null;
+  return [openerPos + cut, firstBracket];
+}
 // Try an email autolink starting at s[i] (first char of the local part).
 // Returns {text, end} or null. The local part must not start/end with '.'.
-function tryEmail(s, i) {
+// The match is the LONGEST valid email whose following character cannot
+// extend it ([A-Za-z0-9_-]); a trailing '_' that closes an earlier
+// emphasis run (isEmCloser) still lets the full email match.
+function tryEmail(s, i, isEmCloser) {
   const n = s.length;
   let j = i;
   while (j < n && /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(s[j])) j++;
@@ -508,11 +591,22 @@ function tryEmail(s, i) {
   if (j >= n || s[j] !== '@') return null;
   let k = j + 1;
   while (k < n && (isAlnum(s[k]) || s[k] === '.' || s[k] === '-' || s[k] === '_')) k++;
-  let domEnd = k;
-  while (domEnd > j + 1 && s[domEnd - 1] === '.') domEnd--;
-  const dom = s.slice(j + 1, domEnd);
-  if (!validDomain(dom, 0)) return null;
-  return { text: s.slice(i, domEnd), end: domEnd };
+  // Backtrack the domain end over label boundaries until the domain is
+  // valid and the following character cannot extend the email.
+  let end = k;
+  while (end > j + 1) {
+    while (end > j + 1 && (s[end - 1] === '.' || s[end - 1] === '_' || s[end - 1] === '-')) end--;
+    if (validEmailDomain(s.slice(j + 1, end))) {
+      if (end >= n) return { text: s.slice(i, end), end: end };
+      const nc = s[end];
+      if (!isAlnum(nc) && nc !== '_' && nc !== '-') return { text: s.slice(i, end), end: end };
+      if (nc === '_' && isEmCloser && isEmCloser(end)) return { text: s.slice(i, end), end: end };
+    }
+    const dot = s.lastIndexOf('.', end - 1);
+    if (dot <= j) break;
+    end = dot;
+  }
+  return null;
 }
 function prevAllowsExt(s, i) {
   // char before position i must not be a word char (letter/digit/_)
@@ -603,7 +697,45 @@ function parseInline(s, refs) {
   head.ch = [];
   let canMerge = false; // true iff the last child of head is a text node we may append to
   const delims = [];
+  const hasBracket = s.indexOf('[') >= 0;
 
+  // True when the '_' at position p can close an earlier '_' emphasis
+  // opener in the current parent (so an email ending just before p
+  // still autolinks in full, as marked does inside emphasis).
+  function isEmCloserPos(p) {
+    if (s[p] !== '_') return false;
+    let j = p;
+    while (j < n && s[j] === '_') j++;
+    const f = flanking(s, p, j - p);
+    const canClose = f.rightFlanking && (!f.leftFlanking || (j < n && isUnicodePunct(s[j])));
+    if (!canClose) return false;
+    for (let d = delims.length - 1; d >= 0; d--) {
+      const dd = delims[d];
+      if (dd.char === '_' && dd.len > 0 && dd.canOpen && dd.node.parent === head) return true;
+    }
+    return false;
+  }
+  // True when source position `pos` lies inside a dead link text
+  // (see deadLinkRegion): no emphasis may start there. The '['
+  // opener may since have been deactivated by a later link forming;
+  // the dead region is a property of the source text, not of the
+  // opener's current state (a dead opener can never form a link
+  // itself, so it is never removed from `delims`).
+  function inDeadRegion(pos) {
+    if (!hasBracket) return false;
+    for (let d = delims.length - 1; d >= 0; d--) {
+      const dd = delims[d];
+      if ((dd.char === '[' || dd.char === '![') && dd.pos < pos) {
+        if (dd.deadComputed === undefined) {
+          dd.deadComputed = true;
+          dd.dead = deadLinkRegion(s, dd.pos, dd.char === '![' ? 2 : 1);
+        }
+        const r = dd.dead;
+        if (r && pos >= r[0] && pos <= r[1]) return true;
+      }
+    }
+    return false;
+  }
   function lastHeadText() {
     const c = head.ch;
     const last = c.length ? c[c.length - 1] : null;
@@ -698,6 +830,8 @@ function parseInline(s, refs) {
         // The opener must sit in the same parent as the closer; when it
         // is inside an already-formed node, skip it and keep scanning.
         if (d.node.parent !== closer.node.parent) continue;
+        // An opener inside a dead link text never forms emphasis.
+        if (d.pos !== undefined && inDeadRegion(d.pos)) continue;
         openerIdx = k; break;
       }
       if (openerIdx < 0) break;
@@ -743,6 +877,10 @@ function parseInline(s, refs) {
     const opener = delims[k];
     const isImg = opener.char === '![';
     const cut = isImg ? 2 : 1;
+    // A ']' with an odd number of backtick runs before it sits inside a
+    // code span (marked's toggle scan) and is not a link-text closer.
+    // The opener stays active: a later ']' may still pair with it.
+    if (!linkTextBracketOK(s, opener.pos + cut, closeIdx)) return 0;
     let dest = null, title = '', end = 0;
     if (s[closeIdx + 1] === '(') {
       const il = parseInlineLink(s, closeIdx + 1);
@@ -929,7 +1067,7 @@ function parseInline(s, refs) {
       appendNode(node);
       canMerge = false; // a delimiter run must not merge with following text
       const f = flanking(s, i, run);
-      const d = { char: c, node: node, len: run, canOpen: false, canClose: false };
+      const d = { char: c, node: node, len: run, pos: i, canOpen: false, canClose: false };
       if (c === '*') { d.canOpen = f.leftFlanking; d.canClose = f.rightFlanking; }
       else {
         d.canOpen = f.leftFlanking && (!f.rightFlanking || (i > 0 && isUnicodePunct(s[i - 1])));
@@ -949,7 +1087,7 @@ function parseInline(s, refs) {
       appendNode(node);
       canMerge = false; // a delimiter run must not merge with following text
       const f = flanking(s, i, run);
-      const d = { char: '~', node: node, len: run, canOpen: f.leftFlanking, canClose: f.rightFlanking };
+      const d = { char: '~', node: node, len: run, pos: i, canOpen: f.leftFlanking, canClose: f.rightFlanking };
       delims.push(d);
       if (d.canClose) processEmphasis(delims.length - 1);
       i = j;
@@ -1036,7 +1174,7 @@ function parseInline(s, refs) {
         continue;
       }
     } else if (c === ':') {
-      const sc = trySchemeEmail(s, i);
+      const sc = trySchemeEmail(s, i, isEmCloserPos);
       const last = lastHeadText();
       if (sc && prevAllowsExt(s, sc.schemeStart) && last &&
           last.s.endsWith(s.slice(sc.schemeStart, i))) {
@@ -1058,7 +1196,7 @@ function parseInline(s, refs) {
       // If the first char of the would-be local part is escaped (`\+`),
       // it is not a real local-part char: no autolink (cm-606).
       if (st < i && prevAllowsExt(s, st) && s[st - 1] !== '\\') {
-        const em = tryEmail(s, st);
+        const em = tryEmail(s, st, isEmCloserPos);
         if (em && em.end > i && cutTrailingText(s.slice(st, i))) {
           const node = N('link', em.text);
           node.dest = 'mailto:' + em.text;
@@ -1151,6 +1289,16 @@ Cursor.prototype.rest = function () {
   if (this.pend > 0) return ' '.repeat(this.pend) + this.s.slice(this.pos + 1);
   return this.s.slice(this.pos);
 };
+// Remove up to n leading whitespace characters (space or tab), each
+// counting as one; a tab is consumed whole (no partial expansion).
+// Column advances by the tab width for tabs (via adv()).
+Cursor.prototype.stripChars = function (n) {
+  while (n > 0) {
+    const c = this.cur();
+    if (c === ' ' || c === '\t') { this.adv(); n--; }
+    else break;
+  }
+};
 Cursor.prototype.blank = function () {
   let p = this.pend > 0 ? this.pos + 1 : this.pos;
   while (p < this.s.length) {
@@ -1159,6 +1307,48 @@ Cursor.prototype.blank = function () {
   }
   return true;
 };
+// Expand leading tabs in `s` to spaces, with tab stops every 4 columns
+// starting from column `col`. Only the leading whitespace run is expanded;
+// a tab after non-whitespace is kept as-is.
+function expandLeadingTabs(s, col) {
+  let i = 0;
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+  let hasTab = false;
+  for (let k = 0; k < i; k++) if (s[k] === '\t') { hasTab = true; break; }
+  if (!hasTab) return s;
+  let out = '', c = col;
+  for (let k = 0; k < i; k++) {
+    if (s[k] === ' ') { out += ' '; c++; }
+    else { const w = 4 - (c % 4); out += ' '.repeat(w); c += w; }
+  }
+  return out + s.slice(i);
+}
+// For a paragraph continuation line directly inside a list item: if the
+// leading whitespace is >= 4 columns, strip 4 columns (tab-aware, a
+// partially consumed tab leaves spaces), then expand any remaining
+// leading tabs to spaces. `startCol` is the absolute column of s[0].
+function stripItemParaIndent(s, startCol) {
+  let col = startCol, i = 0;
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) {
+    if (s[i] === '\t') col += 4 - (col % 4); else col++;
+    i++;
+  }
+  const leadCols = col - startCol;
+  let out = '', k = 0;
+  col = startCol;
+  if (leadCols >= 4) {
+    let n = 4;
+    while (n > 0 && k < s.length) {
+      if (s[k] === ' ') { k++; col++; n--; }
+      else if (s[k] === '\t') {
+        const w = 4 - (col % 4);
+        if (w <= n) { k++; col += w; n -= w; }
+        else { out += ' '.repeat(w - n); col += n; n = 0; k++; }
+      } else break;
+    }
+  }
+  return out + expandLeadingTabs(s.slice(k), col);
+}
 
 // Block node factory.
 function B(t) { return { t: t, ch: [], lines: null, dead: false }; }
@@ -1617,6 +1807,11 @@ function parseBlocks(src) {
     if (tp.t !== 'para') return true;
     // An empty list marker cannot interrupt a paragraph.
     if (lm.empty) return false;
+    // A paragraph that is a direct child of a list item may be
+    // interrupted by an ordered list with any start number (marked
+    // behaviour; at top level or inside a blockquote the spec rule
+    // applies: bullet lists, or ordered lists starting at 1).
+    if (tp.parent && tp.parent.t === 'item') return true;
     return lm.bullet || lm.start === 1;
   }
   // True when the line is a list marker at (or above) the level of an
@@ -1831,7 +2026,10 @@ function parseBlocks(src) {
       }
       if (tp.t === 'para') {
         noteBlockStart(cont);
-        addParaLine(tp, cur.rest());
+        let lt = cur.rest();
+        if (tp.parent && tp.parent.t === 'item') lt = stripItemParaIndent(lt, cur.col);
+        else if (cur.col > 0) lt = expandLeadingTabs(lt, cur.col);
+        addParaLine(tp, lt);
         return;
       }
       // A bare container marker (e.g. `>`) leaves no content: do not
@@ -1839,7 +2037,10 @@ function parseBlocks(src) {
       if (cur.blank()) return;
       const c = blockParent();
       noteBlockStart(c);
-      newPara(c, cur.rest());
+      // A first paragraph line inside a container expands leading tabs
+      // to spaces (at top level a leading tab would be indented code,
+      // so this only fires inside containers).
+      newPara(c, cur.col > 0 ? expandLeadingTabs(cur.rest(), cur.col) : cur.rest());
       return;
     }
   }
@@ -1893,7 +2094,7 @@ function parseBlocks(src) {
       // an open paragraph whose container was reached (e.g. `> foo` then
       // `>  ` at EOF keeps a single-space line in the paragraph).
       if (li === lines.length - 1 && tip().t === 'para' && cur.rest().length > 0 && ci === open.length - 2) {
-        addParaLine(tip(), cur.rest());
+        addParaLine(tip(), cur.col > 0 ? expandLeadingTabs(cur.rest(), cur.col) : cur.rest());
         continue;
       }
       const tp = tip();
@@ -1903,9 +2104,15 @@ function parseBlocks(src) {
       if ((tp.t === 'code' || (tp.t === 'html' && tp.htmlType <= 5)) && ci === open.length - 2) {
         if (tp.t === 'code') {
           // Blank lines inside code keep content after stripping the block
-          // indent (fence indent for fenced code, 4 columns otherwise).
-          cur.advCols(tp.fenced ? (tp.fenceIndent || 0) : 4);
-          tp.lines.push({ s: cur.rest(), nl: curLine.nl });
+          // indent (fence indent, character-wise, for fenced code; 4
+          // columns otherwise). Leading tabs expand when the block sits
+          // inside a container, as for non-blank content lines.
+          const containerCol = cur.col;
+          if (tp.fenced) cur.stripChars(tp.fenceIndent || 0);
+          else cur.advCols(4);
+          let s = cur.rest();
+          if (containerCol > 0) s = expandLeadingTabs(s, cur.col);
+          tp.lines.push({ s: s, nl: curLine.nl });
         } else {
           tp.lines.push({ s: '', nl: curLine.nl });
           tp.lastLine = li;
@@ -1934,15 +2141,28 @@ function parseBlocks(src) {
     if (tp.t === 'code' && tp.fenced) {
       if (isClosingFence(cur, tp.fenceCh, tp.fenceLen)) { tp.closedByFence = true; closeBlocksBelow(ci); }
       else {
-        // Strip up to the fence's indent from the content line.
-        cur.advCols(tp.fenceIndent || 0);
-        tp.lines.push({ s: cur.rest(), nl: curLine.nl });
+        // Strip up to the fence's indent from the content line: each
+        // space or tab counts as one character, a tab is consumed whole.
+        // When the block sits inside a container (the container walk
+        // consumed columns), leading tabs in the remainder expand to
+        // spaces at tab stops; at top level they stay raw tabs.
+        const containerCol = cur.col;
+        cur.stripChars(tp.fenceIndent || 0);
+        let s = cur.rest();
+        if (containerCol > 0) s = expandLeadingTabs(s, cur.col);
+        tp.lines.push({ s: s, nl: curLine.nl });
       }
       continue;
     }
     if (tp.t === 'code') { // indented code
       const save = cur.save();
-      if (cur.advCols(4)) { tp.lines.push({ s: cur.rest(), nl: curLine.nl }); continue; }
+      const containerCol = cur.col;
+      if (cur.advCols(4)) {
+        let s = cur.rest();
+        if (containerCol > 0) s = expandLeadingTabs(s, cur.col);
+        tp.lines.push({ s: s, nl: curLine.nl });
+        continue;
+      }
       cur.restore(save);
       closeBlocksBelow(ci);
     }
@@ -1981,6 +2201,14 @@ function parseBlocks(src) {
         const isSetext = !!trySetext(cur);
         cur.restore(save);
         if (isSetext) lineText = '    ' + lineText;
+      } else if (tp2.parent && tp2.parent.t === 'item') {
+        // A paragraph directly inside a list item: strip a 4-column
+        // indented-code indent when present, then expand leading tabs.
+        lineText = stripItemParaIndent(lineText, cur.col);
+      } else if (cur.col > 0) {
+        // Inside a container (e.g. a blockquote) leading tabs expand to
+        // spaces; at top level they stay raw.
+        lineText = expandLeadingTabs(lineText, cur.col);
       }
       addParaLine(tp2, lineText);
       continue;
