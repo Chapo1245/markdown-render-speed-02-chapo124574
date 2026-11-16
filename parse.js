@@ -2352,15 +2352,21 @@ function parseBlocks(src) {
     // Block-start phase.
     const tp2 = tip();
     // Paragraph continuation: a line that does not start a new block is
-    // added to the open paragraph. When the walk stopped at an outer
-    // container (lazy continuation) leading whitespace is stripped;
-    // otherwise the line is kept as-is. A line that matched an enclosing
-    // list item is never a continuation.
+    // added to the open paragraph. A lazy continuation strips a 4-column
+    // indent when present and keeps shorter leading whitespace (doc-38,
+    // cm-238). A line that matched an enclosing list item is never a
+    // continuation.
     if (tp2.t === 'para' && !stoppedAtList && !startsNewBlock(cur, tp2, false, ci === open.length - 2) && !isOuterListMarker(cur, tp2, ci)) {
-      let lineText = ci < open.length - 2 ? cur.rest().replace(/^[ \t]+/, '') : cur.rest();
+      // A lazy continuation (walk stopped at an outer container): strip a
+      // 4-column indent when the leading whitespace is >= 4 columns, and
+      // keep shorter leading whitespace as paragraph content (doc-38 keeps
+      // 1 space; cm-238 strips 4; b4/b5 tab-aware). Same rule as a
+      // paragraph directly inside a list item.
+      let lineText = cur.rest();
       // A setext-looking lazy continuation line is paragraph text, indented
       // by four spaces (e.g. `> foo` / `bar` / `===` keeps `    ===`).
       if (ci < open.length - 2) {
+        lineText = stripItemParaIndent(lineText, cur.col);
         const save = cur.save();
         const isSetext = !!trySetext(cur);
         cur.restore(save);
