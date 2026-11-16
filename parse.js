@@ -1846,6 +1846,13 @@ function isLocalAnyCode(c) {
 // punctuation ? ! . , : ; * _ ~. Loops until nothing more strips.
 function stripAutolinkTrailing(s, start, end) {
   let e = end;
+  // Paren rule (doc-08): a "(" with no ")" after it in the candidate
+  // ends the URL just before the "(".
+  let lastClose = -1;
+  for (let k = start; k < end; k++) if (s[k] === ')') lastClose = k;
+  for (let k = start; k < end; k++) {
+    if (s[k] === '(' && lastClose <= k) { e = k; break; }
+  }
   for (;;) {
     if (e <= start) return e;
     const last = s[e - 1];
@@ -1855,18 +1862,24 @@ function stripAutolinkTrailing(s, start, end) {
       if (k >= start && s.charCodeAt(k) === 38 && k + 1 < e - 1) { e = k; continue; }
     }
     if (last === ')') {
-      // Strip the trailing ")" only if no unmatched "(" precedes it
-      // (depth clamped at 0, so a ")" before any "(" does not count).
-      // gfm-625 "...Markup+(business))" strips one ")"; doc-10
+      // Strip the trailing ")" unless it closes an unmatched "(" that
+      // contains no nested pair (no ")" between that "(" and this
+      // ")"). A ")" with no unmatched "(" is stripped (gfm-625
+      // "...Markup+(business))" strips one ")"; doc-10
       // "(https://.../nova).)" strips both ")"; doc-12
       // "...page=4)](./docs/create.md)" keeps the final ")" because
-      // the "(" before "./docs" is unmatched.
-      let depth = 0;
-      for (let k = start; k < e - 1; k++) {
-        if (s[k] === '(') depth++;
-        else if (s[k] === ')' && depth > 0) depth--;
+      // the "(" before "./docs" is unmatched), and a ")" closing an
+      // "(" that contains a nested pair is stripped ("a(b(c))" ->
+      // "a(b(c)", but "a(b)(c)" keeps the final ")").
+      let bal = 0, seenClose = false, foundOpen = false;
+      for (let k = e - 2; k >= start; k--) {
+        if (s[k] === ')') { bal++; seenClose = true; }
+        else if (s[k] === '(') {
+          if (bal > 0) bal--;
+          else { foundOpen = true; break; }
+        }
       }
-      if (depth === 0) { e--; continue; }
+      if (!foundOpen || seenClose) { e--; continue; }
     }
     if (last === '?' || last === '!' || last === '.' || last === ',' ||
         last === ':' || last === ';' || last === '*' || last === '_' || last === '~') {
