@@ -1909,6 +1909,10 @@ function parseBlocks(lines, refs, ctx) {
           const rows = [];
           i += 2;
           while (i < n && !isBlankLine(lines[i])) {
+            // A row ends the table if the line starts a block that would
+            // interrupt a paragraph (blockquote, heading, fence, list, hr,
+            // HTML) or is indented code (indent >= 4). Plain text is a row.
+            if (interruptsPara(lines, i, ctx) || indentCols(lines[i].s) >= 4) break;
             const rInd = indentCols(lines[i].s);
             const rS = sliceCol(lines[i].s, Math.min(rInd, 3));
             const cells = splitTableRow(rS).map(c => c.trim());
