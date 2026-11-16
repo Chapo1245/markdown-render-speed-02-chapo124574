@@ -2147,7 +2147,11 @@ function parseBlocks(lines, refs, ctx) {
           while (k < l2S.length && l2S[k] === fs.ch) k++;
           if (k >= fs.len && /^[ \t]*$/.test(l2S.slice(k))) { closed = true; i++; break; }
         }
-        codeLines.push(stripIndentKeepTabs(l2.s, Math.min(ind, 3)));
+        // Tilde fences inside a blockquote never strip the fence indent
+        // from their content lines; backtick fences (and fences at the
+        // top level or in lists) strip up to the fence's indent.
+        if (ctx === 'quote' && fs.ch === '~') codeLines.push(l2.s);
+        else codeLines.push(stripIndentKeepTabs(l2.s, Math.min(ind, 3)));
         i++;
       }
       if (codeLines.length > 0 && codeLines[codeLines.length - 1] === '') codeLines.pop();
