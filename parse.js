@@ -591,9 +591,17 @@ class BP {
       // and the content starts with a tab, the tab expands to spaces
       // (doc-01: 13 spaces + tab becomes 3 spaces, to column 16). At
       // column 0 with nothing stripped, a leading tab is kept literal
-      // (doc-01 toml block: "\tindented" stays "\t").
+      // (doc-01 toml block: "\tindented" stays "\t"). When the tab
+      // immediately follows an INDENTED blockquote marker (the line
+      // starts with whitespace before ">"), the marker's trailing
+      // space does not count toward the tab stop (doc-14: "\t      >
+      // \tindented" expands the tab to 2 spaces, as if at column 10,
+      // the ">" column, not 12). A ">" at column 0 keeps the absolute
+      // column (doc-02's ">   \tindented" keeps 4 spaces).
       if (c.col > 0 && c.tab === 0 && c.s[c.i] === '\t') {
-        c.tab = 4 - (c.col % 4);
+        const indentedQuote = this.markerSpace && (c.s[0] === ' ' || c.s[0] === '\t');
+        const effCol = indentedQuote ? c.col - 2 : c.col;
+        c.tab = 4 - (effCol % 4);
       }
       this.addRaw(tip, cRest(c), L.eol);
       return;
