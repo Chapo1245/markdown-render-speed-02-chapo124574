@@ -7,8 +7,10 @@
 
 const PUNCT = new Set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~');
 function isPunct(ch) { return ch.length === 1 && PUNCT.has(ch); }
-// Unicode punctuation / whitespace tests (spec flanking rules use these)
-const RE_PUNCT = /\p{P}/u;
+// Unicode punctuation / whitespace tests (spec flanking rules use these).
+// CommonMark punctuation = ASCII punct + Unicode P (punctuation) or S
+// (symbol) classes, so currency symbols like £/€ count as punctuation.
+const RE_PUNCT = /[\p{P}\p{S}]/u;
 const RE_WS = /\s/;
 function isPunctU(ch) { return ch.length === 1 && (PUNCT.has(ch) || RE_PUNCT.test(ch)); }
 function isWS(ch) { return ch.length === 1 && RE_WS.test(ch); }
@@ -1094,9 +1096,9 @@ function listMarker(s) {
     if (i >= s.length) return null;
     const d = s[i];
     if (d !== '.' && d !== ')') return null;
-    if (i + 1 >= s.length) return { ordered: true, start: parseInt(s.slice(0, i), 10), markerLen: i + 1 };
+    if (i + 1 >= s.length) return { ordered: true, start: parseInt(s.slice(0, i), 10), markerLen: i + 1, delim: d };
     const e = s[i + 1];
-    if (e === ' ' || e === '\t') return { ordered: true, start: parseInt(s.slice(0, i), 10), markerLen: i + 1 };
+    if (e === ' ' || e === '\t') return { ordered: true, start: parseInt(s.slice(0, i), 10), markerLen: i + 1, delim: d };
     return null;
   }
   return null;
@@ -1532,9 +1534,8 @@ function listContentIndent(line, markerLen) {
   const contentCol = col;
   const contentIdx = k;
   if (k >= line.length) {
-    // Empty item: no whitespace after the marker means the indent is the
-    // marker itself; otherwise it is markerLen+1.
-    if (k === markerLen) return { col: markerLen, idx: markerLen, contentCol, contentIdx };
+    // Empty item: the content indent is markerLen+1 (the marker plus one
+    // space); the next line's content is stripped by that amount.
     return { col: markerLen + 1, idx: markerLen + 1, contentCol, contentIdx };
   }
   if (contentCol - markerLen > 4) return { col: markerLen + 1, idx: contentIdx, contentCol, contentIdx };
@@ -1562,6 +1563,7 @@ function parseList(lines, i, refs) {
     const m = listMarker(s);
     if (m === null) break;
     if (m.ordered !== ordered) break;
+    if (ordered && m.delim !== firstM.delim) break;
     if (!ordered && m.bullet !== firstM.bullet) break;
     if (ind > firstInd + 3) break;
     const strip = Math.min(ind, 3);
@@ -1569,7 +1571,10 @@ function parseList(lines, i, refs) {
     const contentInd = strip + ci.col;
     const itemLines = [];
     const firstLead = Math.max(0, ci.contentCol - ci.col);
-    itemLines.push({ s: ' '.repeat(firstLead) + s.slice(ci.idx), nl: ln.nl, blank: false });
+    const firstContent = s.slice(ci.idx);
+    // An item whose marker line has no content (only whitespace after the
+    // marker) starts empty; trailing spaces are not content.
+    itemLines.push({ s: /^[ \t]*$/.test(firstContent) ? '' : ' '.repeat(firstLead) + firstContent, nl: ln.nl, blank: false });
     j++;
     let itemBlank = false;
     while (j < n) {
@@ -1582,7 +1587,20 @@ function parseList(lines, i, refs) {
         const kS = sliceCol(lines[k].s, Math.min(kInd, 3));
         const kM = listMarker(kS);
         const kSameMarker = kM !== null && kM.ordered === ordered &&
-          (!ordered ? kM.bullet === firstM.bullet : true) && kInd <= firstInd + 3;
+          (ordered ? kM.delim === firstM.delim : kM.bullet === firstM.bullet) && kInd <= firstInd + 3;
+        // An item with no content yet (empty marker) ends at a blank line;
+        // following indented lines are not part of it. But a following item
+        // marker of the same list continues the list (it is the next item).
+        const itemEmpty = itemLines.every(l => l.blank || /^[ \t]*$/.test(l.s));
+        if (itemEmpty) {
+          if (kSameMarker) {
+            blankBeforeItem = true;
+            itemBlank = true;
+            j = k;
+            break;
+          }
+          itemBlank = true; break;
+        }
         if (kInd >= contentInd) {
           for (let b = j; b < k; b++) itemLines.push({ s: '', nl: lines[b].nl, blank: true });
           j = k;
@@ -1606,7 +1624,7 @@ function parseList(lines, i, refs) {
       const l2M = listMarker(l2S);
       if (l2Ind < contentInd && isHr(l2S)) break;
       if (l2M !== null && l2M.ordered === ordered &&
-          (!ordered ? l2M.bullet === firstM.bullet : true) &&
+          (ordered ? l2M.delim === firstM.delim : l2M.bullet === firstM.bullet) &&
           l2Ind < contentInd && l2Ind <= firstInd + 3) break;
       if (l2Ind >= contentInd) {
         itemLines.push({ s: sliceCol(l2.s, contentInd), nl: l2.nl, blank: false });
