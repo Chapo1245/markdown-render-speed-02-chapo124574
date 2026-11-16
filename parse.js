@@ -1113,18 +1113,18 @@ function tryRefDef(lines, i, refs) {
   if (isBlankLine(ln)) return 0;
   let s = sliceCol(ln.s, Math.min(indentCols(ln.s), 3));
   if (s[0] !== '[') return 0;
-  const lab = scanLabel(s, 1);
+  const lab = scanLabelLines(lines, i, s);
   if (lab === null) return 0;
   const key = foldLabel(resolveEscapes(lab.text));
   if (key.length === 0) return 0;
-  let rest = lab.end < s.length ? s.slice(lab.end) : '';
+  let rest = lab.rest;
   // The ':' must follow the label (optional whitespace allowed before it? no
   // - the spec requires ':' immediately after ']'... allow whitespace?).
   let p = 0;
   while (p < rest.length && (rest[p] === ' ' || rest[p] === '\t')) p++;
   if (rest[p] !== ':') return 0;
   p++;
-  let li = i; // current line index
+  let li = lab.endLi; // current line index
   let cur = rest.slice(p); // remainder of the current line
   // Skip whitespace; if the line ends, the dest is on the next line.
   function skipWS() {
@@ -1186,11 +1186,12 @@ function tryRefDef(lines, i, refs) {
     li++;
     if (li < n && !isBlankLine(lines[li])) {
       const nc = lines[li].s.replace(/^[ \t]+/, '');
-      const t = parseTitle(nc);
+      const t = scanTitleLines(lines, li, nc);
       if (t !== null) {
         // After the title, the rest of the line must be blank.
         if (/^[ \t]*$/.test(t.rest)) {
           title = t.title;
+          li = t.endLi;
           cur = '';
         } else {
           // Not a valid title line: the def ends without a title, and this
@@ -1204,10 +1205,11 @@ function tryRefDef(lines, i, refs) {
       li = saveLi; cur = saveCur;
     }
   } else {
-    const t = parseTitle(cur);
+    const t = scanTitleLines(lines, li, cur);
     if (t !== null) {
       if (/^[ \t]*$/.test(t.rest)) {
         title = t.title;
+        li = t.endLi;
         cur = '';
       } else return 0;
     } else return 0;
@@ -1217,6 +1219,74 @@ function tryRefDef(lines, i, refs) {
   if (!refs.has(key)) refs.set(key, { href: dest, title });
   return li - i + 1;
 }
+// Scan a title starting at `cur` (remainder of line `li`, starting with the
+// opening quote). The title may span lines; newlines are kept in the title.
+// Returns {title, endLi, rest} or null.
+function scanTitleLines(lines, li, cur) {
+  const n = lines.length;
+  const q = cur[0];
+  if (q !== '"' && q !== "'" && q !== '(') return null;
+  let content = '';
+  let depth = q === '(' ? 1 : 0;
+  let k = 1;
+  let curLi = li;
+  let curStr = cur;
+  while (true) {
+    while (k < curStr.length) {
+      const c = curStr[k];
+      if (c === '\\' && k + 1 < curStr.length && isPunct(curStr[k + 1])) {
+        content += curStr[k] + curStr[k + 1];
+        k += 2;
+        continue;
+      }
+      if (q === '(') {
+        if (c === '(') { depth++; content += c; k++; continue; }
+        if (c === ')') {
+          depth--;
+          if (depth === 0) return { title: resolveEscapes(content), endLi: curLi, rest: curStr.slice(k + 1) };
+          content += c; k++; continue;
+        }
+      } else if (c === q) {
+        return { title: resolveEscapes(content), endLi: curLi, rest: curStr.slice(k + 1) };
+      }
+      content += c;
+      k++;
+    }
+    curLi++;
+    if (curLi >= n || isBlankLine(lines[curLi])) return null;
+    content += '\n';
+    curStr = sliceCol(lines[curLi].s, Math.min(indentCols(lines[curLi].s), 3));
+    k = 0;
+  }
+}
+
+// Scan a link label starting at lines[i] position 1 (just after '['). The
+// label may span lines; newlines are kept in the text (folded later).
+// Returns {text, endLi, rest} or null.
+function scanLabelLines(lines, i, s) {
+  const n = lines.length;
+  let text = '';
+  let li = i;
+  let cur = s;
+  let k = 1;
+  while (true) {
+    while (k < cur.length) {
+      const c = cur[k];
+      if (c === '\\' && k + 1 < cur.length && isPunct(cur[k + 1])) { text += cur[k] + cur[k + 1]; k += 2; continue; }
+      if (c === '[') return null;
+      if (c === ']') return { text, endLi: li, rest: cur.slice(k + 1) };
+      text += c;
+      k++;
+    }
+    li++;
+    if (li >= n || isBlankLine(lines[li])) return null;
+    text += '\n';
+    cur = sliceCol(lines[li].s, Math.min(indentCols(lines[li].s), 3));
+    k = 0;
+    if (li - i >= 3) return null;
+  }
+}
+
 // Parse a title ("...", '...', or (...)) at the start of s. Returns
 // {title, rest} or null. The title is on one line.
 function parseTitle(s) {
@@ -1253,6 +1323,10 @@ function parseTitle(s) {
 function interruptsPara(lines, j, ctx) {
   const ln = lines[j];
   if (isBlankLine(ln)) return true;
+  // A whitespace-only line that is not blank (unterminated, e.g. trailing
+  // spaces at the end of a container's inner source) is paragraph content,
+  // not an interrupting blank.
+  if (/^[ \t]+$/.test(ln.s)) return false;
   const ind = indentCols(ln.s);
   // A line indented 4+ columns is indented code, which cannot interrupt.
   if (ind >= 4) return false;
@@ -1417,6 +1491,10 @@ function parseQuote(lines, i, refs) {
     if (innerLines.length > 0) innerLines[innerLines.length - 1].nl = false;
     const parsed = parseBlocks(innerLines, refs, 'quote');
     if (!lastBlockIsPara(parsed)) break;
+    // A trailing blank line in the inner source closes the paragraph: a
+    // lazy line after it does not continue the quote.
+    const lastInner = inner[inner.length - 1];
+    if (lastInner && isBlankLine({ s: lastInner.s, nl: lastInner.nl })) break;
     // Lazy setext line: if the previous inner line was also lazy and the
     // paragraph is a direct child of this quote, prepend 4 spaces.
     let text = ln.s;
