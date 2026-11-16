@@ -1499,7 +1499,7 @@ function stripQuote(s) {
   const gtCol = ind;
   const rest = s.slice(i + 1);
   const restCol = gtCol + 1;
-  if (rest[0] === ' ') return rest.slice(1);
+  if (rest[0] === ' ') return expandLeadingFrom(rest.slice(1), restCol + 1);
   if (rest[0] === '\t') {
     const w = 4 - (restCol % 4);
     return ' '.repeat(w - 1) + expandLeadingFrom(rest.slice(1), restCol + w);
