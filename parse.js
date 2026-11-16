@@ -2928,6 +2928,32 @@ function makeEmphasis(opener, closer, use, kind) {
   }
   // A partially used closer stays in place (after the wrapper if it was
   // a sibling, or inside the link node if it was nested there).
+  // Record this wrapper's use and its closer's canOpen, so an outer
+  // strong can tell whether an inner em/del inside it can trigger the
+  // leftover-inside placement (doc-30).
+  wrap.use = use;
+  wrap.closerCanOpen = closer.canOpen;
+  // Leftover closer inside a strong: when the closer is only partly
+  // used and the strong contains an em/del (use 1) whose closer can
+  // open, the leftover delimiter renders INSIDE the strong (probed:
+  // "**a *b*c***" -> "<strong>a <em>b</em>c*</strong>"; an em wrapper
+  // keeps it outside, and a strong with no such inner em/del does
+  // too). Only when the closer is a direct sibling (S === closer).
+  if (kind === 'strong' && closer.node.len > 0 && S === closer.node) {
+    let foundInner = false;
+    const stack = [wrap];
+    while (stack.length > 0 && !foundInner) {
+      const node = stack.pop();
+      for (let c = node.firstChild; c; c = c.next) {
+        if ((c.t === 'em' || c.t === 'del') && c.use === 1 && c.closerCanOpen) { foundInner = true; break; }
+        stack.push(c);
+      }
+    }
+    if (foundInner) {
+      iUnlink(closer.node);
+      iAppend(wrap, closer.node);
+    }
+  }
   return true;
 }
 
