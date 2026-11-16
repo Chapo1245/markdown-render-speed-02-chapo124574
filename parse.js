@@ -2341,7 +2341,7 @@ function linkTextBalanced(s, start, end) {
 //   "[foo]" literal).
 // (The matching-']' bracket-balance check lives in the ']' case, which
 // must not deactivate the opener when it fails — cm-520.)
-function tryLink(opener, closerPos, s, n, refs, root) {
+function tryLink(opener, closerPos, s, n, refs, root, fullRefs) {
   const first = opener.node.next;
   const last = root.lastChild;
   const p = closerPos + 1;
@@ -2382,7 +2382,12 @@ function tryLink(opener, closerPos, s, n, refs, root) {
       const label = normalizeLabel(lab);
       if (label) {
         const ref = refs.get(label);
-        if (ref) { dest = ref.dest; title = ref.title; end = labEnd + 1; }
+        if (ref) {
+          dest = ref.dest; title = ref.title; end = labEnd + 1;
+          // A formed full reference link: its text range is hidden
+          // from the virtual code-span scan (doc-09/16/28/35).
+          if (fullRefs) fullRefs.push([opener.pos + (opener.ch === '![' ? 2 : 1), closerPos]);
+        }
         else return null; // valid label, no reference: no fallback
       }
       // Empty label: fall through (not a valid full-ref label).
@@ -2422,6 +2427,73 @@ function tryLink(opener, closerPos, s, n, refs, root) {
 }
 
 // ---------------------------------------------------------------------------
+// Virtual code spans (probed vs marked, doc-09/16/28/35): a greedy
+// left-to-right scan of the paragraph text. A backtick run pairs with
+// the next run of the SAME length anywhere later; on pairing, the
+// content is skipped (the closer is consumed); on failure the run is
+// literal and scanning continues at the next run. Emphasis delimiters
+// inside a paired virtual span are dead — but only root-scope ones
+// (a delimiter inside a formed link keeps its link scope and still
+// forms). Backtick runs inside the text of a formed FULL reference
+// link/image ([text][label], resolved) are invisible to the scan:
+// they neither open nor close a virtual span. Runs inside inline
+// links/images, collapsed/shortcut refs, and unresolved full refs DO
+// participate (probed). The span itself renders nothing; it only
+// kills emphasis, so the real code-span scan in parseInline is
+// untouched.
+// ---------------------------------------------------------------------------
+function markVirtualSpans(text, n, delims, fullRefs) {
+  // Collect the visible backtick runs (maximal runs, in order). A run
+  // is escaped when preceded by an odd number of backslashes: it can
+  // never OPEN a span (the real scanner makes "\`" a lit node;
+  // doc-22: a lone "\`" must not pair across the paragraph), but it
+  // CAN close one — the code-span search is purely textual, and
+  // marked pairs an opener with an escaped closer (doc-26: the span
+  // ending at the "\`" before "more"). Lengths are textual.
+  const runs = [];
+  let i = 0;
+  while (i < n) {
+    if (text[i] !== '`') { i++; continue; }
+    let j = i;
+    while (j < n && text[j] === '`') j++;
+    let b = i - 1, bs = 0;
+    while (b >= 0 && text[b] === '\\') { bs++; b--; }
+    const escaped = (bs % 2) === 1;
+    let hidden = false;
+    for (let h = 0; h < fullRefs.length; h++) {
+      if (i >= fullRefs[h][0] && i < fullRefs[h][1]) { hidden = true; break; }
+    }
+    if (!hidden) runs.push([i, j, j - i, escaped]);
+    i = j;
+  }
+  // Greedy pairing over the visible runs. An escaped run never opens;
+  // any run (escaped or not) of the same length can close.
+  const spans = [];
+  let r = 0;
+  while (r < runs.length) {
+    if (runs[r][3]) { r++; continue; }
+    const len = runs[r][2];
+    let q = r + 1, found = -1;
+    while (q < runs.length) {
+      if (runs[q][2] === len) { found = q; break; }
+      q++;
+    }
+    if (found === -1) { r++; continue; }
+    spans.push([runs[r][1], runs[found][0]]);
+    r = found + 1;
+  }
+  if (spans.length === 0) return;
+  for (let d = 0; d < delims.length; d++) {
+    const e = delims[d];
+    if (e.removed || e.scope !== null) continue;
+    if (e.ch !== '*' && e.ch !== '_' && e.ch !== '~') continue;
+    for (let s = 0; s < spans.length; s++) {
+      if (e.pos >= spans[s][0] && e.pos < spans[s][1]) { e.removed = true; break; }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The inline scanner: one pass building a linked list of inline nodes plus
 // a delimiter stack; emphasis is resolved afterwards (processEmphasis).
 // ---------------------------------------------------------------------------
@@ -2440,6 +2512,9 @@ function parseInline(text, refs, out) {
   const wwwStarts = cands.wwwStarts, schemeStarts = cands.schemeStarts, emailStarts = cands.emailStarts;
   const root = inode('root');
   const delims = [];
+  // Text ranges of formed full reference links/images, for the
+  // virtual code-span scan (their backtick runs are invisible).
+  const fullRefs = [];
   let i = 0;
   function addText(a, b) {
     if (a >= b) return;
@@ -2680,7 +2755,7 @@ function parseInline(text, refs, out) {
         i++;
         continue;
       }
-      const end = tryLink(opener, i, text, n, refs, root);
+      const end = tryLink(opener, i, text, n, refs, root, fullRefs);
       if (end !== null) {
         // Deactivate link openers that precede this one — but only when
         // a LINK formed, and only '[' openers. An image does not block
@@ -2800,6 +2875,7 @@ function parseInline(text, refs, out) {
     addText(i, j);
     i = j;
   }
+  markVirtualSpans(text, n, delims, fullRefs);
   processEmphasis(delims);
   renderInline(root, out);
 }
