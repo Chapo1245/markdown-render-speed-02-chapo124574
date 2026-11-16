@@ -666,6 +666,26 @@ class BP {
         }
       }
       c.i = save.i; c.col = save.col; c.tab = save.tab;
+      if (save.col > 0 && save.tab === 0) {
+        // A tab after spaces at the start of a fenced line inside a
+        // container (quote/list) expands from its column measured as
+        // (raw column - quoteCol), and the fence indent is stripped
+        // from the EXPANDED leading whitespace (probed: ">   ```rust"
+        // + ">   \tindented" is 4 spaces; ">    ```rust" +
+        // ">   \tindented" is 3; ">  ```" + ">  \tindented" is 1).
+        // Strip-first dropped the tab or measured it from the
+        // post-strip column. Top-level lines (save.col 0) keep the
+        // literal tab (probed), so this is container-only.
+        let k = c.i, sp = 0;
+        while (c.s[k] === ' ') { sp++; k++; }
+        if (sp > 0 && c.s[k] === '\t') {
+          const tabCol = (c.col + sp) - this.quoteCol;
+          const expanded = sp + (4 - (tabCol % 4));
+          const keep = Math.max(0, expanded - tip.fenceIndent);
+          this.addRaw(tip, ' '.repeat(keep) + c.s.slice(k + 1), L.eol);
+          return;
+        }
+      }
       cSkip(c, tip.fenceIndent);
       // If the fence-indent strip landed inside a tab, the whole tab
       // is dropped, not just the stripped columns (doc-17: a
@@ -1331,7 +1351,13 @@ BP.prototype.addBlocks = function (c, L) {
       code.fenced = true;
       code.fenceCh = b.ch;
       code.fenceLen = n;
-      code.fenceIndent = fenceIndent;
+      // A tilde fence never strips its indent from content lines
+      // (probed: "  ~~~\n  code" keeps "  code", and
+      // ">    ~~~ts\n>    code" keeps "   code"; doc-22/29). A
+      // backtick fence does strip (cm-318). Inside a list item the
+      // item already consumed the indent, so fenceIndent is 0 there
+      // either way.
+      code.fenceIndent = b.ch === '~' ? 0 : fenceIndent;
       code.lang = processInfo(infoRaw);
       this.childStarted(tip);
       this.stack.push(code);
